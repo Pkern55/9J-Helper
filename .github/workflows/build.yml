@@ -34,6 +34,8 @@ jobs:
 
       - name: Build exe
         shell: pwsh
+        env:
+          PYTHON: python  # the setup-python interpreter that has PyInstaller installed
         run: ./build_exe.ps1
 
       - uses: actions/upload-artifact@v4

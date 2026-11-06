@@ -1,7 +1,10 @@
 # Builds dist\9J-Helper.exe. Run from the project folder:  powershell -ExecutionPolicy Bypass -File build_exe.ps1
 $ErrorActionPreference = "Stop"
-$py = if (Test-Path ".venv\Scripts\python.exe") { ".venv\Scripts\python.exe" }
-       elseif (Get-Command py -ErrorAction SilentlyContinue) { "py" } else { "python" }
+# Which Python: $env:PYTHON (CI sets this), then the project .venv, then the `py` launcher.
+$py = if ($env:PYTHON) { $env:PYTHON }
+      elseif (Test-Path ".venv\Scripts\python.exe") { ".venv\Scripts\python.exe" }
+      elseif (Get-Command py -ErrorAction SilentlyContinue) { "py" } else { "python" }
+Write-Host "Using Python: $py"
 
 $pyArgs = @("-m", "PyInstaller", "--noconfirm", "--clean", "--onefile", "--windowed",
             "--name", "9J-Helper", "--collect-data", "pdfplumber")
