@@ -26,7 +26,7 @@ def main(argv=None):
     for pl in plan.lines:
         ln = pl.line
         where = f"{pl.tab} row {pl.row}" if pl.row else (pl.tab or ", ".join(pl.candidates))
-        print(f"  {ln.part:<12} {ln.delivery_date:%m/%d/%Y} {ln.req_qty:>8g} {ln.firm_plan:<3} "
+        print(f"  {ln.sheet_part:<12} {ln.delivery_date:%m/%d/%Y} {ln.net_qty:>8g} {ln.firm_plan:<3} "
               f"{pl.status:<17} {where}  {pl.note}")
     if args.out:
         xlsx_book.apply(plan, args.xlsx, args.out)

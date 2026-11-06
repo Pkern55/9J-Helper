@@ -7,7 +7,8 @@ from nine_j_helper import google_book, planner
 from nine_j_helper.config import spreadsheet_id_from
 from nine_j_helper.nine_j import NineJParseError, parse_text
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Real sample files are kept out of git; point NINEJ_SAMPLES at the folder holding them.
+ROOT = os.environ.get("NINEJ_SAMPLES") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SAMPLE_PDF = os.path.join(ROOT, "Example 9J", "9J_504206_R M KERNER COMPANY 106096.pdf")
 SAMPLE_XLSX = os.path.join(ROOT, "Copy of HAUX - RMKCo.xlsx")
 
@@ -27,7 +28,7 @@ Last Receipt Date Receipt Qty Hendrickson Item # Item Description
 NEWPART-9 BRAND NEW THING
 P.O.# Supplier Item # Item Revision
 106096 NEWPART-9 A
-Weekly 12/01/26 NEWPART-9 ADDED 11/1 F 10.0 10.0 10.0
+Weekly 12/01/26 NP9-REF ADDED 11/1 F 10.0 10.0 10.0
 """
 
 
@@ -105,41 +106,37 @@ def test_layout_detection_skips_non_order_tabs():
     assert tabs["S-Beams"].layout.part_copy is None
 
 
-def test_plan_routes_dedupes_fills_x_rows_and_inserts_overflow():
+def test_plan_uses_item_number_net_qty_and_only_three_columns():
     doc = parse_text(SAMPLE_TEXT)
     plan = planner.build_plan(doc, planner.load_tabs(fake_rows()))
-    by = {(pl.line.part, pl.line.delivery_date): pl for pl in plan.lines}
+    by = {(pl.line.sheet_part, pl.line.delivery_date): pl for pl in plan.lines}
     assert by[("010545-1", date(2026, 10, 28))].status == planner.DUPLICATE
+    # Brand-new part: PO is ignored, so the user must choose a tab
+    assert [pl.line.sheet_part for pl in plan.unrouted] == ["NEWPART-9"]
+    assert set(plan.unrouted[0].candidates) == {"Machined Only", "S-Beams"}
     assert by[("010545-1", date(2026, 11, 4))].row == 5
-    # Unknown part routed by PO in the tab title
-    newp = by[("NEWPART-9", date(2026, 12, 1))]
-    assert newp.tab == "Machined Only" and newp.status == planner.NEW
-    assert newp.row == 6
-    # Third new line overflows the two x rows -> inserted after them
-    jan = by[("010545-1", date(2027, 1, 4))]
-    assert jan.row == 7
+    assert by[("010545-1", date(2027, 1, 4))].row == 6
     tw = plan.writes["Machined Only"]
-    assert (tw.insert_at, tw.insert_count) == (7, 1)
-    assert tw.expected_x_rows == [5, 6]
-    assert tw.format_source_row == 4
-    row5 = tw.rows[5]
-    assert row5[0] == "010545-1" and row5[1] == "HAUX" and row5[2] == _d(2026, 11, 4)
-    assert row5[3] == 28.0 and row5[4] == "=WORKDAY(C5,-2)" and row5[6] == "=D5-F5"
-    assert row5[10] == "010545-1"
-    assert 5 not in row5 and 7 not in row5  # Shipped Qty / Actual Ship Date left for dad
+    assert tw.insert_count == 0
+    assert tw.rows[5] == {0: "010545-1", 2: date(2026, 11, 4), 3: 28.0}
+    assert tw.rows[6] == {0: "010545-1", 2: date(2027, 1, 4), 3: 84.0}  # Net Req Qty, not 1,084
 
 
-def test_unrouted_when_no_match_and_override_resolves():
-    rows = fake_rows()
-    rows["Machined Only"][0] = ["Machined parts"]  # no PO in title
+def test_override_routes_new_part_and_overflow_inserts_rows():
     doc = parse_text(SAMPLE_TEXT)
-    tabs = planner.load_tabs(rows)
-    plan = planner.build_plan(doc, tabs)
-    assert [pl.line.part for pl in plan.unrouted] == ["NEWPART-9"]
-    plan = planner.build_plan(doc, tabs, {"NEWPART-9": "S-Beams"})
+    tabs = planner.load_tabs(fake_rows())
+    plan = planner.build_plan(doc, tabs, {"NEWPART-9": "Machined Only"})
     assert not plan.unrouted
-    pl = [p for p in plan.lines if p.line.part == "NEWPART-9"][0]
-    assert pl.tab == "S-Beams" and pl.row == 6  # no x rows -> inserted after last order
+    newp = [pl for pl in plan.lines if pl.line.sheet_part == "NEWPART-9"][0]
+    assert newp.line.part == "NP9-REF"  # the line's own Part column is ignored
+    assert newp.tab == "Machined Only" and newp.row == 6
+    tw = plan.writes["Machined Only"]
+    assert tw.rows[6] == {0: "NEWPART-9", 2: date(2026, 12, 1), 3: 10.0}
+    assert (tw.insert_at, tw.insert_count) == (7, 1)  # 3 new lines, only 2 x rows
+    assert tw.expected_x_rows == [5, 6]
+    plan = planner.build_plan(doc, tabs, {"NEWPART-9": "S-Beams"})
+    newp = [pl for pl in plan.lines if pl.line.sheet_part == "NEWPART-9"][0]
+    assert newp.tab == "S-Beams" and newp.row == 6  # no x rows -> inserted after last order
 
 
 def test_part_key_tolerates_lost_leading_zeros():
@@ -153,10 +150,13 @@ def test_sample_against_export():
     from nine_j_helper.nine_j import parse_pdf
     plan = planner.build_plan(parse_pdf(SAMPLE_PDF), planner.load_tabs(xlsx_book.read_rows(SAMPLE_XLSX)))
     assert {pl.tab for pl in plan.lines} == {"Machined Only"}
-    dups = [(pl.line.part, pl.line.delivery_date) for pl in plan.lines if pl.status == planner.DUPLICATE]
+    dups = [(pl.line.sheet_part, pl.line.delivery_date) for pl in plan.lines if pl.status == planner.DUPLICATE]
     assert sorted(dups) == [("010545-1", date(2026, 10, 28)), ("010545-2", date(2026, 10, 28))]
     assert sorted(pl.row for pl in plan.lines if pl.status == planner.NEW) == list(range(35, 45))
-    assert plan.writes["Machined Only"].insert_count == 0
+    tw = plan.writes["Machined Only"]
+    assert tw.insert_count == 0
+    jan = [c for c in tw.rows.values() if c[0] == "009956" and c[2] == date(2027, 1, 4)][0]
+    assert jan[3] == 184.0  # Net Req Qty (the 9J's Req Qty is 193)
 
 
 # ------------------------------------------------------------------ google backend
@@ -166,6 +166,7 @@ def test_cell_value_protects_numeric_text():
     assert google_book._cell_value("010545-1") == "010545-1"
     assert google_book._cell_value("=D5-F5") == "=D5-F5"
     assert google_book._cell_value(46330) == 46330
+    assert google_book._cell_value(date(2026, 11, 4)) == "11/4/2026"
 
 
 class FakeWS:
@@ -195,17 +196,26 @@ class FakeBook:
 def test_google_apply_builds_requests():
     rows = fake_rows()
     book = FakeBook(rows)
-    plan = planner.build_plan(parse_text(SAMPLE_TEXT), planner.load_tabs(rows))
+    plan = planner.build_plan(parse_text(SAMPLE_TEXT), planner.load_tabs(rows),
+                              {"NEWPART-9": "Machined Only"})
     n = google_book.apply(book, plan)
     assert n == 3
     reqs = book.batch["requests"]
-    assert reqs[0]["insertDimension"]["range"] == {"sheetId": 1, "dimension": "ROWS", "startIndex": 6, "endIndex": 7}
-    assert sum(1 for r in reqs if "copyPaste" in r) == 3
+    assert reqs == [{"insertDimension": {
+        "range": {"sheetId": 1, "dimension": "ROWS", "startIndex": 6, "endIndex": 7},
+        "inheritFromBefore": True}}]  # only the row insert; no formatting copied
     assert book.values["valueInputOption"] == "USER_ENTERED"
     first = book.values["data"][0]
-    assert first["range"] == "'Machined Only'!A5:K5"
-    vals = first["values"][0]
-    assert vals[5] is None and vals[7] is None  # untouched cells
+    assert first["range"] == "'Machined Only'!A5:D5"
+    assert first["values"][0] == ["010545-1", None, "11/4/2026", 28.0]  # B (Location) untouched
+
+
+def test_google_apply_with_no_extra_rows_sends_no_structure_requests():
+    rows = fake_rows()
+    book = FakeBook(rows)
+    plan = planner.build_plan(parse_text(SAMPLE_TEXT), planner.load_tabs(rows))
+    assert google_book.apply(book, plan) == 2
+    assert book.batch is None
 
 
 def test_google_apply_refuses_if_sheet_changed():

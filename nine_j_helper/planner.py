@@ -6,8 +6,6 @@ logic runs against Google Sheets or a local .xlsx export.
 
 from __future__ import annotations
 
-import re
-from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -89,7 +87,6 @@ class TabLayout:
     net: Optional[int] = None
     part_copy: Optional[int] = None
     width: int = 0
-    title_text: str = ""  # text above the header (e.g. "PO 106096 ...")
 
 
 def detect_layout(name: str, rows: List[List]) -> Optional[TabLayout]:
@@ -117,7 +114,6 @@ def detect_layout(name: str, rows: List[List]) -> Optional[TabLayout]:
                 lay.net = i
             elif t == "part number" and lay.part_copy is None:
                 lay.part_copy = i
-        lay.title_text = " ".join(str(c) for row_ in rows[:r_idx] for c in row_ if not _blank(c))
         return lay
     return None
 
@@ -150,23 +146,6 @@ class TabState:
                 st.existing.add((k, s))
         return st
 
-    def row(self, sheet_row: int) -> List:
-        return self.rows[sheet_row - 1] if sheet_row - 1 < len(self.rows) else []
-
-    def location_for(self, part: str):
-        k = part_key(part)
-        loc = None
-        for r in self.data_rows:
-            row = self.row(r)
-            if part_key(_cell(row, self.layout.part)) == k and not _blank(_cell(row, self.layout.location)):
-                loc = _cell(row, self.layout.location)
-        if loc is None and self.layout.location is not None:
-            vals = [_cell(self.row(r), self.layout.location) for r in self.data_rows]
-            vals = [v for v in vals if not _blank(v)]
-            if vals:
-                loc = Counter(vals).most_common(1)[0][0]
-        return loc
-
     @property
     def last_data_row(self) -> Optional[int]:
         return self.data_rows[-1] if self.data_rows else None
@@ -196,7 +175,6 @@ class PlannedLine:
 @dataclass
 class TabWrite:
     tab: str
-    format_source_row: Optional[int]
     date_col: int = 0
     insert_at: Optional[int] = None  # insert `insert_count` rows starting at this 1-based row
     insert_count: int = 0
@@ -219,28 +197,20 @@ class Plan:
 
 
 def _route(line: ScheduleLine, tabs: Dict[str, TabState], overrides: Dict[str, str]) -> Tuple[Optional[str], List[str], str]:
-    k = part_key(line.part)
-    ov = overrides.get(part_text(line.part))
+    k = part_key(line.sheet_part)
+    ov = overrides.get(part_text(line.sheet_part))
     if ov in tabs:
         return ov, [], "your earlier choice"
     having = [n for n, t in tabs.items() if k in t.parts]
     if len(having) == 1:
         return having[0], [], ""
-    po_tabs = []
-    if line.po:
-        pat = re.compile(rf"(?<!\d){re.escape(line.po)}(?!\d)")
-        po_tabs = [n for n, t in tabs.items() if pat.search(t.layout.title_text)]
     if len(having) > 1:
-        both = [n for n in having if n in po_tabs]
-        if len(both) == 1:
-            return both[0], [], "part is on several tabs; matched by PO"
         return None, having, "part is on several tabs"
-    if len(po_tabs) == 1:
-        return po_tabs[0], [], "new part; matched by PO"
-    return None, (po_tabs or list(tabs)), "new part"
+    return None, list(tabs), "new part"
 
 
 def build_plan(doc: NineJ, tabs: Dict[str, TabState], overrides: Optional[Dict[str, str]] = None) -> Plan:
+    """Only Part Number (9J Item #), Delivery Date and Req Qty (9J Net Req Qty) are written."""
     overrides = overrides or {}
     planned: List[PlannedLine] = []
     seen = set()
@@ -249,7 +219,7 @@ def build_plan(doc: NineJ, tabs: Dict[str, TabState], overrides: Optional[Dict[s
         if tab is None:
             planned.append(PlannedLine(ln, UNROUTED, candidates=cands, note=note))
             continue
-        key = (part_key(ln.part), to_serial(ln.delivery_date))
+        key = (part_key(ln.sheet_part), to_serial(ln.delivery_date))
         if key in tabs[tab].existing or (tab, key) in seen:
             planned.append(PlannedLine(ln, DUPLICATE, tab=tab, note=note))
             continue
@@ -261,9 +231,9 @@ def build_plan(doc: NineJ, tabs: Dict[str, TabState], overrides: Optional[Dict[s
         new = [pl for pl in planned if pl.status == NEW and pl.tab == name]
         if not new:
             continue
-        new.sort(key=lambda pl: (pl.line.delivery_date, part_text(pl.line.part)))
+        new.sort(key=lambda pl: (pl.line.delivery_date, part_text(pl.line.sheet_part)))
         lay = st.layout
-        tw = TabWrite(tab=name, format_source_row=st.last_data_row, date_col=lay.date)
+        tw = TabWrite(tab=name, date_col=lay.date)
         slots = list(st.x_rows[: len(new)])
         tw.expected_x_rows = list(slots)
         overflow = len(new) - len(slots)
@@ -274,18 +244,11 @@ def build_plan(doc: NineJ, tabs: Dict[str, TabState], overrides: Optional[Dict[s
             slots += list(range(after + 1, after + 1 + overflow))
         for pl, r in zip(new, slots):
             pl.row = r
-            cells: Dict[int, object] = {lay.part: part_text(pl.line.part),
-                                        lay.date: to_serial(pl.line.delivery_date)}
-            if lay.location is not None:
-                cells[lay.location] = st.location_for(pl.line.part)
+            # Dates stay `date` objects; each backend writes them in its own way.
+            cells: Dict[int, object] = {lay.part: part_text(pl.line.sheet_part),
+                                        lay.date: pl.line.delivery_date}
             if lay.req is not None:
-                cells[lay.req] = pl.line.req_qty
-            if lay.ship_to is not None:
-                cells[lay.ship_to] = f"=WORKDAY({col_letter(lay.date)}{r},-2)"
-            if lay.net is not None and lay.req is not None and lay.shipped is not None:
-                cells[lay.net] = f"={col_letter(lay.req)}{r}-{col_letter(lay.shipped)}{r}"
-            if lay.part_copy is not None:
-                cells[lay.part_copy] = part_text(pl.line.part)
+                cells[lay.req] = pl.line.net_qty
             tw.rows[r] = cells
         writes[name] = tw
     return Plan(lines=planned, writes=writes)

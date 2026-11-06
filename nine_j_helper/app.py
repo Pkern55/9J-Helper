@@ -55,7 +55,7 @@ class App(tk.Tk):
         ttk.Label(self, textvariable=self.info_var, wraplength=860, justify="left").pack(fill="x", **pad)
 
         cols = ("tab", "part", "date", "qty", "fp", "status")
-        heads = ("Sheet tab", "Part", "Delivery date", "Req qty", "Firm/Plan", "Status")
+        heads = ("Sheet tab", "Part (Item #)", "Delivery date", "Req qty (Net)", "Firm/Plan", "Status")
         widths = (170, 110, 100, 70, 70, 260)
         frame = ttk.Frame(self)
         frame.pack(fill="both", expand=True, **pad)
@@ -191,7 +191,7 @@ class App(tk.Tk):
         # Ask about parts we can't place, one question per part.
         asked = set()
         for pl in self.plan.unrouted:
-            part = pl.line.part
+            part = pl.line.sheet_part
             if part in asked:
                 continue
             asked.add(part)
@@ -238,7 +238,7 @@ class App(tk.Tk):
                 status = UNROUTED + " (skipped)"
                 tag = "unrouted"
             self.tree.insert("", "end", tags=(tag,), values=(
-                pl.tab or "—", ln.part, f"{ln.delivery_date:%m/%d/%Y}", f"{ln.req_qty:g}",
+                pl.tab or "—", ln.sheet_part, f"{ln.delivery_date:%m/%d/%Y}", f"{ln.net_qty:g}",
                 ln.firm_plan, status))
         n = self.plan.new_count
         dup = sum(1 for pl in self.plan.lines if pl.status == DUPLICATE)

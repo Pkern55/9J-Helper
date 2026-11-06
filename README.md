@@ -22,14 +22,20 @@ Reads a Hendrickson **9J Supplier Schedule** PDF and adds its lines to the order
 
 ### What it writes
 For each new line it fills the next **"x" row** on the matching tab (adding rows if the x rows run
-out): Part Number, Location (copied from that part's last row), Delivery Date, Req Qty,
-Ship to Customer `=WORKDAY(date,-2)`, Net/Balance `=Req-Shipped`, and the extra part-number column on
-*Machined Only*. **Shipped Qty, Actual Ship Date, P/S and Comments are left blank for you.**
-Formatting is copied from the last order row. Firm and planned lines are both added.
+out) with just three cells:
 
-Tabs are matched by part number (the tab that already has that part); brand-new parts go to the
-tab whose title mentions the 9J's PO number (e.g. "PO 106096" → *Machined Only*). Other tabs
-(Keys, packaging, forecasts…) are never touched.
+| Sheet column | Comes from the 9J |
+|---|---|
+| Part Number | **Hendrickson Item #** |
+| Delivery Date | Delivery Date |
+| Req Qty | **Net Req Qty** |
+
+Everything else (Location, Ship to Customer, Shipped Qty, Net/Balance, ship dates, comments) is
+left for you. No formatting is copied. Firm and planned lines are both added.
+
+Tabs are matched by part number only (the tab that already has that part). The PO number is
+ignored. For a part that isn't on any tab yet, the app asks which tab to use and remembers it.
+Other tabs (Keys, packaging, forecasts…) are never touched.
 
 Settings and the Google sign-in are saved in `%APPDATA%\9J Helper\`. Delete that folder to start over.
 
@@ -73,6 +79,10 @@ py -m venv .venv
 .venv\Scripts\python run_9j_helper.py            # run the app
 powershell -ExecutionPolicy Bypass -File build_exe.ps1   # build dist\9J-Helper.exe
 ```
+
+To include the real sample tests (files are kept out of git), point `NINEJ_SAMPLES` at the folder
+holding `Example 9J\...pdf` and `Copy of HAUX - RMKCo.xlsx`:
+`$env:NINEJ_SAMPLES = "C:\path\to\samples"; .venv\Scripts\python -m pytest`
 
 Dry run against an Excel export of the sheet (never modifies the export):
 

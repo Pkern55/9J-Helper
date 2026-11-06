@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import re
+from datetime import date
 from typing import Dict, List
 
 import gspread
 
 from . import config
-from .planner import Plan, col_letter, load_tabs, part_text
+from .planner import Plan, col_letter, load_tabs
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
@@ -49,8 +50,11 @@ _NUMERIC_LOOKING = re.compile(r"^[+-]?[\d.,]+(?:[eE][+-]?\d+)?$|^\d{1,2}/\d{1,2}
 
 
 def _cell_value(v):
-    """Values are sent USER_ENTERED so formulas work; protect text that Sheets would
-    otherwise reinterpret (e.g. part '009956' -> 9956)."""
+    """Values are sent USER_ENTERED. Dates go as m/d/yyyy text, which Sheets turns into a real
+    date (and gives it a date format even on an unformatted cell). Other text that Sheets would
+    reinterpret is protected (e.g. part '009956' -> 9956)."""
+    if isinstance(v, date):
+        return f"{v.month}/{v.day}/{v.year}"
     if isinstance(v, str) and not v.startswith("=") and _NUMERIC_LOOKING.match(v):
         return "'" + v
     return v
@@ -82,17 +86,7 @@ def apply(book: gspread.Spreadsheet, plan: Plan) -> int:
                           "startIndex": tw.insert_at - 1,
                           "endIndex": tw.insert_at - 1 + tw.insert_count},
                 "inheritFromBefore": True}})
-    # Copy formatting (date/number formats, borders) from the last order row.
-    for tw in plan.writes.values():
-        if not tw.format_source_row:
-            continue
-        for r in tw.rows:
-            requests.append({"copyPaste": {
-                "source": {"sheetId": sheet_ids[tw.tab],
-                           "startRowIndex": tw.format_source_row - 1, "endRowIndex": tw.format_source_row},
-                "destination": {"sheetId": sheet_ids[tw.tab],
-                                "startRowIndex": r - 1, "endRowIndex": r},
-                "pasteType": "PASTE_FORMAT"}})
+    # No formatting is copied; new rows keep whatever formatting the x rows already have.
     if requests:
         book.batch_update({"requests": requests})
 

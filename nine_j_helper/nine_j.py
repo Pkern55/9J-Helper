@@ -44,6 +44,12 @@ class ScheduleLine:
     reference: str = ""
     po: str = ""
     item_description: str = ""
+    item: str = ""  # Hendrickson Item # of the block this line belongs to
+
+    @property
+    def sheet_part(self) -> str:
+        """Part number written to the sheet: the block's Hendrickson Item #."""
+        return self.item or self.part
 
     @property
     def is_firm(self) -> bool:
@@ -175,6 +181,7 @@ def parse_text(text: str) -> NineJ:
                 reference=(m.group("ref") or "").strip(),
                 po=item.po,
                 item_description=item.description,
+                item=item.hendrickson_item,
             ))
         i += 1
 
@@ -183,6 +190,7 @@ def parse_text(text: str) -> NineJ:
         for sl in it.lines:
             sl.po = sl.po or it.po
             sl.item_description = sl.item_description or it.description
+            sl.item = sl.item or it.hendrickson_item
 
     if not doc.lines:
         raise NineJParseError("No schedule lines found. Is this a Hendrickson 9J supplier schedule?")
