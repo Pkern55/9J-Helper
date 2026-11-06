@@ -1,0 +1,107 @@
+# 9J Helper
+
+Reads a Hendrickson **9J Supplier Schedule** PDF and adds its lines to the orders Google Sheet
+(e.g. "HAUX - RMKCo"). No Python needed: it's a single Windows program.
+
+## For Dad: using it
+
+1. Download **9J-Helper.exe** from the [Releases page](../../releases/latest) (put it on your Desktop).
+2. Double-click it. The first time, Windows may say *"Windows protected your PC"*:
+   click **More info → Run anyway**.
+3. Click **Browse…** and pick the 9J PDF from your email/downloads.
+4. The first time only:
+   - Paste the link to your Google Sheet (open the sheet in your browser, copy the address bar).
+   - A browser window opens to sign in to Google. You'll see *"Google hasn't verified this app"*:
+     click **Advanced → Go to 9J Helper (unsafe)** and then **Continue**. (It's our own app;
+     it only gets access to Google Sheets.)
+5. Look over the list:
+   - **green "new → row 35"**: will be added at that row
+   - **grey "already on sheet"**: that part + delivery date is already there, so it's skipped
+   - **red "choose a tab"**: the app didn't know which tab; it asks you, and remembers next time
+6. Click **Update Sheet**, then **Yes**.
+
+### What it writes
+For each new line it fills the next **"x" row** on the matching tab (adding rows if the x rows run
+out) with just three cells:
+
+| Sheet column | Comes from the 9J |
+|---|---|
+| Part Number | **Hendrickson Item #** |
+| Delivery Date | Delivery Date |
+| Req Qty | **Net Req Qty** |
+
+Everything else (Location, Ship to Customer, Shipped Qty, Net/Balance, ship dates, comments) is
+left for you. No formatting is copied. Firm and planned lines are both added.
+
+Tabs are matched by part number only (the tab that already has that part). The PO number is
+ignored. For a part that isn't on any tab yet, the app asks which tab to use and remembers it.
+Other tabs (Keys, packaging, forecasts…) are never touched.
+
+Settings and the Google sign-in are saved in `%APPDATA%\9J Helper\`. Delete that folder to start over.
+
+## One-time Google setup (for whoever maintains the app)
+
+The app needs a Google OAuth "Desktop" client so it can ask Dad's permission to edit his sheets.
+
+1. Go to <https://console.cloud.google.com/>, create a project (e.g. "9J Helper").
+2. **APIs & Services → Library →** enable **Google Sheets API**.
+3. **APIs & Services → OAuth consent screen** (Google Auth Platform):
+   - User type **External**, app name "9J Helper", your email as support/developer contact.
+   - Scopes: add `.../auth/spreadsheets`.
+   - **Audience → Publish app** (switch from *Testing* to *In production*). In Testing mode Google
+     signs users out every 7 days. Verification isn't needed for personal use; users just see the
+     "unverified app" screen once.
+4. **Clients → Create client → Desktop app**. Download the JSON.
+5. Make it available to the build:
+   - **GitHub:** repo **Settings → Secrets and variables → Actions → New repository secret**,
+     name `GOOGLE_CLIENT_SECRET_JSON`, value = the whole JSON file contents.
+   - **Local:** save it as `client_secret.json` in the project folder (it's git-ignored).
+
+> A desktop app's client secret can't really be kept secret (Google documents this), but
+> keep it out of the repo anyway. Access to a sheet still requires the user to sign in and approve.
+
+## Releasing a new version
+
+```
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+GitHub Actions runs the tests, builds `9J-Helper.exe` and attaches it to a Release.
+(Every push to a pull request also builds the exe as a downloadable workflow artifact.)
+
+## Development
+
+```
+py -m venv .venv
+.venv\Scripts\python -m pip install -r requirements-dev.txt
+.venv\Scripts\python -m pytest
+.venv\Scripts\python run_9j_helper.py            # run the app
+powershell -ExecutionPolicy Bypass -File build_exe.ps1   # build dist\9J-Helper.exe
+```
+
+To include the real sample tests (files are kept out of git), point `NINEJ_SAMPLES` at the folder
+holding `Example 9J\...pdf` and `Copy of HAUX - RMKCo.xlsx`:
+`$env:NINEJ_SAMPLES = "C:\path\to\samples"; .venv\Scripts\python -m pytest`
+
+Dry run against an Excel export of the sheet (never modifies the export):
+
+```
+.venv\Scripts\python -m nine_j_helper.cli "path\to\9J.pdf" "Copy of HAUX - RMKCo.xlsx" --out preview.xlsx
+```
+
+Code layout:
+
+| File | Purpose |
+|---|---|
+| `nine_j_helper/nine_j.py` | PDF → header, items, schedule lines |
+| `nine_j_helper/planner.py` | finds order tabs/columns, routes parts, skips duplicates, picks rows |
+| `nine_j_helper/google_book.py` | Google sign-in, reading tabs, writing the plan |
+| `nine_j_helper/xlsx_book.py` | same against a local .xlsx (tests / dry runs) |
+| `nine_j_helper/app.py` | the window |
+| `nine_j_helper/config.py` | settings in `%APPDATA%\9J Helper` |
+
+## Planned next
+
+Replace mode: for each part on the 9J, remove that part's rows that haven't shipped and put the
+9J's lines in their place.

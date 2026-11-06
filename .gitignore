@@ -1,0 +1,20 @@
+# Python / build
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+build/
+dist/
+
+# Google sign-in files: never commit
+client_secret*.json
+token.json
+
+# Business data: keep out of the repo
+*.xlsx
+*.pdf
+Example 9J/
+
+# Claude Code worktrees
+.claude/worktrees/
+*.spec
