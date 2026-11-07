@@ -11,7 +11,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from . import __version__, config, google_book
 from .nine_j import NineJParseError, parse_pdf
-from .planner import DUPLICATE, NEW, UNROUTED, build_plan, load_tabs
+from .planner import DUPLICATE, NEW, UNROUTED, build_plan
 
 TITLE = f"9J Helper {__version__}"
 
@@ -166,8 +166,7 @@ class App(tk.Tk):
             if self.client is None:
                 self.client = google_book.connect()
             book = google_book.open_book(self.client, sid)
-            tabs = load_tabs(google_book.read_rows(book))
-            return book, tabs
+            return book, google_book.load_order_tabs(book)
 
         def done(result, err):
             if err:

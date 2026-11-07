@@ -139,6 +139,27 @@ def test_override_routes_new_part_and_overflow_inserts_rows():
     assert newp.tab == "S-Beams" and newp.row == 6  # no x rows -> inserted after last order
 
 
+def test_text_color_comes_from_parts_latest_row():
+    doc = parse_text(SAMPLE_TEXT)
+    # rows 3 and 4 are both 010545-1; the later one (row 4) wins
+    tabs = planner.load_tabs(fake_rows(), {"Machined Only": {3: "RED", 4: "BLUE"}})
+    plan = planner.build_plan(doc, tabs, {"NEWPART-9": "Machined Only"})
+    tw = plan.writes["Machined Only"]
+    assert tw.text_colors == {5: "BLUE", 7: "BLUE"}  # row 6 = brand-new part: left alone
+    assert tw.part_col == 0 and tw.border_cols == 10
+
+
+def test_text_color_default_when_latest_row_is_uncolored():
+    tabs = planner.load_tabs(fake_rows(), {"Machined Only": {3: "RED"}})
+    tw = planner.build_plan(parse_text(SAMPLE_TEXT), tabs).writes["Machined Only"]
+    assert tw.text_colors == {5: None, 6: None}  # explicit default, overriding any x-row color
+
+
+def test_row_blocks_split_non_consecutive_rows():
+    tw = planner.TabWrite(tab="t", rows={9: {}, 5: {}, 6: {}, 11: {}, 10: {}})
+    assert tw.row_blocks() == [(5, 6), (9, 11)]
+
+
 def test_part_key_tolerates_lost_leading_zeros():
     assert planner.part_key("009956") == planner.part_key(9956.0)
 
@@ -148,8 +169,11 @@ def test_part_key_tolerates_lost_leading_zeros():
 def test_sample_against_export():
     from nine_j_helper import xlsx_book
     from nine_j_helper.nine_j import parse_pdf
-    plan = planner.build_plan(parse_pdf(SAMPLE_PDF), planner.load_tabs(xlsx_book.read_rows(SAMPLE_XLSX)))
+    plan = planner.build_plan(parse_pdf(SAMPLE_PDF), xlsx_book.load_order_tabs(SAMPLE_XLSX))
     assert {pl.tab for pl in plan.lines} == {"Machined Only"}
+    tw0 = plan.writes["Machined Only"]
+    colors = {tw0.rows[r][0]: tw0.text_colors[r] for r in tw0.rows}
+    assert colors == {"010545-1": None, "010545-2": "FF0000FF", "009956": "FFFF00FF"}
     dups = [(pl.line.sheet_part, pl.line.delivery_date) for pl in plan.lines if pl.status == planner.DUPLICATE]
     assert sorted(dups) == [("010545-1", date(2026, 10, 28)), ("010545-2", date(2026, 10, 28))]
     assert sorted(pl.row for pl in plan.lines if pl.status == planner.NEW) == list(range(35, 45))
@@ -192,30 +216,84 @@ class FakeBook:
     def values_batch_update(self, body):
         self.values = body
 
+    def fetch_sheet_metadata(self, params=None):
+        self.meta_params = params
+        return self.meta
+
+
+BLUE = {"rgbColor": {"blue": 1}}
+THIN = {"style": "SOLID", "colorStyle": {"rgbColor": {}}}
+
+
+def _border_req(first, last, sheet_id=1):
+    return {"updateBorders": {
+        "range": {"sheetId": sheet_id, "startRowIndex": first - 1, "endRowIndex": last,
+                  "startColumnIndex": 0, "endColumnIndex": 10},
+        "top": THIN, "bottom": THIN, "left": THIN, "right": THIN,
+        "innerHorizontal": THIN, "innerVertical": THIN}}
+
+
+def _color_req(row, style, sheet_id=1):
+    return {"repeatCell": {
+        "range": {"sheetId": sheet_id, "startRowIndex": row - 1, "endRowIndex": row,
+                  "startColumnIndex": 0, "endColumnIndex": 1},
+        "cell": {"userEnteredFormat": {"textFormat": {"foregroundColorStyle": style}}},
+        "fields": "userEnteredFormat.textFormat.foregroundColorStyle"}}
+
 
 def test_google_apply_builds_requests():
     rows = fake_rows()
     book = FakeBook(rows)
-    plan = planner.build_plan(parse_text(SAMPLE_TEXT), planner.load_tabs(rows),
-                              {"NEWPART-9": "Machined Only"})
+    tabs = planner.load_tabs(rows, {"Machined Only": {4: BLUE}})
+    plan = planner.build_plan(parse_text(SAMPLE_TEXT), tabs, {"NEWPART-9": "Machined Only"})
     n = google_book.apply(book, plan)
     assert n == 3
-    reqs = book.batch["requests"]
-    assert reqs == [{"insertDimension": {
-        "range": {"sheetId": 1, "dimension": "ROWS", "startIndex": 6, "endIndex": 7},
-        "inheritFromBefore": True}}]  # only the row insert; no formatting copied
+    assert book.batch["requests"] == [
+        {"insertDimension": {
+            "range": {"sheetId": 1, "dimension": "ROWS", "startIndex": 6, "endIndex": 7},
+            "inheritFromBefore": True}},
+        _color_req(5, BLUE),  # 010545-1 keeps its blue; row 6 (new part) untouched
+        _color_req(7, BLUE),
+        _border_req(5, 7),    # x rows 5-6 + inserted row 7 form one block
+    ]
     assert book.values["valueInputOption"] == "USER_ENTERED"
     first = book.values["data"][0]
     assert first["range"] == "'Machined Only'!A5:D5"
     assert first["values"][0] == ["010545-1", None, "11/4/2026", 28.0]  # B (Location) untouched
 
 
-def test_google_apply_with_no_extra_rows_sends_no_structure_requests():
+def test_google_apply_without_insert_sets_default_color_and_borders():
     rows = fake_rows()
     book = FakeBook(rows)
     plan = planner.build_plan(parse_text(SAMPLE_TEXT), planner.load_tabs(rows))
     assert google_book.apply(book, plan) == 2
-    assert book.batch is None
+    black = {"rgbColor": {}}
+    assert book.batch["requests"] == [_color_req(5, black), _color_req(6, black), _border_req(5, 6)]
+
+
+def test_read_part_colors_parses_grid_data():
+    book = FakeBook(fake_rows())
+    book.meta = {"sheets": [{"properties": {"title": "Machined Only"}, "data": [{
+        "startRow": 1,  # first rowData entry is sheet row 2
+        "rowData": [
+            {"values": [{"userEnteredFormat": {"textFormat": {"foregroundColorStyle": BLUE}}}]},
+            {},  # no values at all
+            {"values": [{"userEnteredFormat": {"textFormat": {"foregroundColorStyle": {"rgbColor": {}}}}}]},
+            {"values": [{"userEnteredFormat": {"textFormat": {"foregroundColor": {"red": 1}}}}]},
+            {"values": [{"userEnteredFormat": {"textFormat": {"foregroundColorStyle": {"themeColor": "ACCENT1"}}}}]},
+        ]}]}]}
+    out = google_book.read_part_colors(book, ["Machined Only"])
+    assert out == {"Machined Only": {2: BLUE, 5: {"rgbColor": {"red": 1}}, 6: {"themeColor": "ACCENT1"}}}
+    assert book.meta_params["ranges"] == ["'Machined Only'!A:A"]
+    assert book.meta_params["includeGridData"] == "true"
+
+
+def test_load_order_tabs_reads_colors_only_for_order_tabs():
+    book = FakeBook(fake_rows())
+    book.meta = {"sheets": []}
+    tabs = google_book.load_order_tabs(book)
+    assert set(tabs) == {"Machined Only", "S-Beams"}
+    assert book.meta_params["ranges"] == ["'Machined Only'!A:A", "'S-Beams'!A:A"]
 
 
 def test_google_apply_refuses_if_sheet_changed():

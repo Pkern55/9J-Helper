@@ -31,7 +31,12 @@ out) with just three cells:
 | Req Qty | **Net Req Qty** |
 
 Everything else (Location, Ship to Customer, Shipped Qty, Net/Balance, ship dates, comments) is
-left for you. No formatting is copied. Firm and planned lines are both added.
+left for you. Firm and planned lines are both added.
+
+Formatting on new rows:
+- The **Part Number text color** matches that part's most recent row on the tab (e.g. 010545-2
+  stays blue). Brand-new parts keep the default color. Background and bold aren't changed.
+- Columns **A–J get thin black borders** on all sides, like the rest of the order rows.
 
 Tabs are matched by part number only (the tab that already has that part). The PO number is
 ignored. For a part that isn't on any tab yet, the app asks which tab to use and remembers it.
