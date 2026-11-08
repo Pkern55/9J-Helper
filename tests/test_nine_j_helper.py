@@ -178,8 +178,11 @@ def test_sample_against_export():
     assert sorted(dups) == [("010545-1", date(2026, 10, 28)), ("010545-2", date(2026, 10, 28))]
     assert sorted(pl.row for pl in plan.lines if pl.status == planner.NEW) == list(range(35, 45))
     tw = plan.writes["Machined Only"]
-    assert tw.insert_count == 0
-    jan = [c for c in tw.rows.values() if c[0] == "009956" and c[2] == date(2027, 1, 4)][0]
+    # Machined Only no longer has placeholder "x" rows (the filter range now grows with the data),
+    # so all 10 new lines are inserted below the last data row (row 34) and join the filter.
+    assert not xlsx_book.load_order_tabs(SAMPLE_XLSX)["Machined Only"].x_rows
+    assert (tw.insert_at, tw.insert_count) == (35, 10)
+    jan =[c for c in tw.rows.values() if c[0] == "009956" and c[2] == date(2027, 1, 4)][0]
     assert jan[3] == 184.0  # Net Req Qty (the 9J's Req Qty is 193)
 
 
