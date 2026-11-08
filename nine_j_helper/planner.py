@@ -14,6 +14,8 @@ from .nine_j import NineJ, ScheduleLine
 
 EPOCH = date(1899, 12, 30)  # Google Sheets / Excel day 0
 
+BORDER_COLS = 10  # A..J: the order tabs' bordered columns
+
 NEW = "new"
 DUPLICATE = "already on sheet"
 UNROUTED = "choose a tab"
@@ -126,9 +128,13 @@ class TabState:
     x_rows: List[int] = field(default_factory=list)  # 1-based placeholder rows
     existing: set = field(default_factory=set)  # {(part_key, serial)}
     parts: set = field(default_factory=set)
+    # Part Number text color of each part's most recent row (None = default/black).
+    latest_color: Dict[str, object] = field(default_factory=dict)
 
     @classmethod
-    def build(cls, layout: TabLayout, rows: List[List]) -> "TabState":
+    def build(cls, layout: TabLayout, rows: List[List],
+              colors: Optional[Dict[int, object]] = None) -> "TabState":
+        colors = colors or {}
         st = cls(layout=layout, rows=rows)
         for r in range(layout.header_row, len(rows)):  # rows after the header (0-based index r)
             row = rows[r]
@@ -141,6 +147,7 @@ class TabState:
             st.data_rows.append(r + 1)
             k = part_key(p)
             st.parts.add(k)
+            st.latest_color[k] = colors.get(r + 1)  # later rows overwrite earlier ones
             s = serial_of(_cell(row, layout.date))
             if s is not None:
                 st.existing.add((k, s))
@@ -151,13 +158,21 @@ class TabState:
         return self.data_rows[-1] if self.data_rows else None
 
 
-def load_tabs(sheet_rows: Dict[str, List[List]]) -> Dict[str, TabState]:
+def load_tabs(sheet_rows: Dict[str, List[List]],
+              part_colors: Optional[Dict[str, Dict[int, object]]] = None) -> Dict[str, TabState]:
+    """`part_colors` (optional): {tab: {sheet_row: Part Number text color}}; colors are opaque
+    values handed back unchanged to the same backend when writing."""
+    part_colors = part_colors or {}
     tabs = {}
     for name, rows in sheet_rows.items():
         lay = detect_layout(name, rows)
         if lay:
-            tabs[name] = TabState.build(lay, rows)
+            tabs[name] = TabState.build(lay, rows, part_colors.get(name))
     return tabs
+
+
+def order_tab_names(sheet_rows: Dict[str, List[List]]) -> List[str]:
+    return [n for n, rows in sheet_rows.items() if detect_layout(n, rows)]
 
 
 # ---------------------------------------------------------------- plan
@@ -180,6 +195,21 @@ class TabWrite:
     insert_count: int = 0
     rows: Dict[int, Dict[int, object]] = field(default_factory=dict)  # row -> {col: value}
     expected_x_rows: List[int] = field(default_factory=list)
+    part_col: int = 0
+    # row -> Part Number text color to set (None = default/black). Rows of brand-new parts
+    # are absent, so their text color is left alone.
+    text_colors: Dict[int, object] = field(default_factory=dict)
+    border_cols: int = BORDER_COLS  # new rows get thin borders on columns A..(A+border_cols-1)
+
+    def row_blocks(self) -> List[Tuple[int, int]]:
+        """Consecutive runs of new rows as (first_row, last_row), 1-based inclusive."""
+        blocks: List[Tuple[int, int]] = []
+        for r in sorted(self.rows):
+            if blocks and r == blocks[-1][1] + 1:
+                blocks[-1] = (blocks[-1][0], r)
+            else:
+                blocks.append((r, r))
+        return blocks
 
 
 @dataclass
@@ -233,7 +263,7 @@ def build_plan(doc: NineJ, tabs: Dict[str, TabState], overrides: Optional[Dict[s
             continue
         new.sort(key=lambda pl: (pl.line.delivery_date, part_text(pl.line.sheet_part)))
         lay = st.layout
-        tw = TabWrite(tab=name, date_col=lay.date)
+        tw = TabWrite(tab=name, date_col=lay.date, part_col=lay.part)
         slots = list(st.x_rows[: len(new)])
         tw.expected_x_rows = list(slots)
         overflow = len(new) - len(slots)
@@ -250,5 +280,8 @@ def build_plan(doc: NineJ, tabs: Dict[str, TabState], overrides: Optional[Dict[s
             if lay.req is not None:
                 cells[lay.req] = pl.line.net_qty
             tw.rows[r] = cells
+            k = part_key(pl.line.sheet_part)
+            if k in st.latest_color:
+                tw.text_colors[r] = st.latest_color[k]
         writes[name] = tw
     return Plan(lines=planned, writes=writes)

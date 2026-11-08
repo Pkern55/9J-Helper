@@ -9,7 +9,7 @@ import argparse
 
 from . import xlsx_book
 from .nine_j import parse_pdf
-from .planner import build_plan, load_tabs
+from .planner import build_plan
 
 
 def main(argv=None):
@@ -22,7 +22,7 @@ def main(argv=None):
     doc = parse_pdf(args.pdf)
     print(f"Release {doc.release_id}  date {doc.release_date}  PO {', '.join(doc.pos)}  "
           f"{len(doc.lines)} lines")
-    plan = build_plan(doc, load_tabs(xlsx_book.read_rows(args.xlsx)))
+    plan = build_plan(doc, xlsx_book.load_order_tabs(args.xlsx))
     for pl in plan.lines:
         ln = pl.line
         where = f"{pl.tab} row {pl.row}" if pl.row else (pl.tab or ", ".join(pl.candidates))
