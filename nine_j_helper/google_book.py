@@ -110,6 +110,31 @@ def load_order_tabs(book: gspread.Spreadsheet):
     return load_tabs(rows, read_part_colors(book, order_tab_names(rows)))
 
 
+def read_basic_filters(book: gspread.Spreadsheet) -> Dict[int, Dict]:
+    """{sheetId: basicFilter} for tabs that have a filter (the sortable 'table')."""
+    meta = book.fetch_sheet_metadata(params={"fields": "sheets(properties(sheetId),basicFilter)"})
+    return {s["properties"]["sheetId"]: s["basicFilter"]
+            for s in meta.get("sheets", []) if s.get("basicFilter")}
+
+
+def _filter_extension(flt: Dict, insert_at, insert_count: int, last_row: int):
+    """setBasicFilter request that grows the tab's filter range down to `last_row` (1-based),
+    or None if it already reaches it. Rows inserted inside the filter range join it
+    automatically; rows below its last row (inserted or already there) do not, so they
+    would not be sortable/filterable with the rest."""
+    rng = flt.get("range", {})
+    end = rng.get("endRowIndex")
+    if end is None:
+        return None
+    if insert_count and insert_at is not None and insert_at - 1 < end:
+        end += insert_count  # Sheets already grew the filter for rows inserted inside it
+    if last_row <= end:
+        return None
+    new = {k: v for k, v in flt.items() if k != "criteria"}  # filterSpecs supersedes criteria
+    new["range"] = {**rng, "endRowIndex": last_row}
+    return {"setBasicFilter": {"filter": new}}
+
+
 def apply(book: gspread.Spreadsheet, plan: Plan) -> int:
     """Write the plan. Re-reads the sheet first and refuses if the target rows changed."""
     if not plan.writes:
@@ -132,6 +157,19 @@ def apply(book: gspread.Spreadsheet, plan: Plan) -> int:
                           "startIndex": tw.insert_at - 1,
                           "endIndex": tw.insert_at - 1 + tw.insert_count},
                 "inheritFromBefore": True}})
+    # Pull the new rows (and any data rows already below it) into each tab's filter range.
+    # Sent as its own request after the rows exist, so the filter sees the final layout.
+    filter_requests = []
+    filters = read_basic_filters(book)
+    for tw in plan.writes.values():
+        flt = filters.get(sheet_ids[tw.tab])
+        if not flt:
+            continue
+        last_row = max(max(tw.rows), fresh[tw.tab].last_data_row or 0)
+        ext = _filter_extension(flt, tw.insert_at, tw.insert_count, last_row)
+        if ext:
+            ext["setBasicFilter"]["filter"]["range"]["sheetId"] = sheet_ids[tw.tab]
+            filter_requests.append(ext)
     # Requests run in order, so these use the row numbers after the insert above.
     thin = {"style": "SOLID", "colorStyle": _BLACK}
     for tw in plan.writes.values():
@@ -164,4 +202,6 @@ def apply(book: gspread.Spreadsheet, plan: Plan) -> int:
                          "values": [values]})
             count += 1
     book.values_batch_update({"valueInputOption": "USER_ENTERED", "data": data})
+    if filter_requests:
+        book.batch_update({"requests": filter_requests})
     return count

@@ -202,7 +202,9 @@ class FakeBook:
     def __init__(self, rows):
         self.rows = rows
         self.batch = None
+        self.batches = []
         self.values = None
+        self.meta = {"sheets": []}
 
     def worksheets(self):
         return [FakeWS(t, i) for i, t in enumerate(self.rows)]
@@ -212,6 +214,7 @@ class FakeBook:
 
     def batch_update(self, body):
         self.batch = body
+        self.batches.append(body)
 
     def values_batch_update(self, body):
         self.values = body
@@ -246,9 +249,19 @@ def test_google_apply_builds_requests():
     book = FakeBook(rows)
     tabs = planner.load_tabs(rows, {"Machined Only": {4: BLUE}})
     plan = planner.build_plan(parse_text(SAMPLE_TEXT), tabs, {"NEWPART-9": "Machined Only"})
+    # The tab's filter covers rows 2-6 (0-based end 6): the inserted row 7 sits right below it.
+    book.meta = {"sheets": [{"properties": {"sheetId": 1}, "basicFilter": {
+        "range": {"sheetId": 1, "startRowIndex": 1, "endRowIndex": 6, "endColumnIndex": 10},
+        "criteria": {"0": {}},
+        "filterSpecs": [{"columnIndex": 0, "filterCriteria": {}}]}}]}
     n = google_book.apply(book, plan)
     assert n == 3
-    assert book.batch["requests"] == [
+    # Last request: after the rows are written, the filter grows to include the inserted row.
+    assert book.batches[-1]["requests"] == [
+        {"setBasicFilter": {"filter": {
+            "range": {"sheetId": 1, "startRowIndex": 1, "endRowIndex": 7, "endColumnIndex": 10},
+            "filterSpecs": [{"columnIndex": 0, "filterCriteria": {}}]}}}]
+    assert book.batches[0]["requests"] == [
         {"insertDimension": {
             "range": {"sheetId": 1, "dimension": "ROWS", "startIndex": 6, "endIndex": 7},
             "inheritFromBefore": True}},
@@ -260,6 +273,21 @@ def test_google_apply_builds_requests():
     first = book.values["data"][0]
     assert first["range"] == "'Machined Only'!A5:D5"
     assert first["values"][0] == ["010545-1", None, "11/4/2026", 28.0]  # B (Location) untouched
+
+
+def test_filter_extension_grows_to_last_row():
+    flt = {"range": {"startRowIndex": 1, "endRowIndex": 34, "endColumnIndex": 11},
+           "criteria": {"0": {}}, "filterSpecs": [{"columnIndex": 0}], "sortSpecs": [{"x": 1}]}
+    ext = google_book._filter_extension(flt, insert_at=None, insert_count=0, last_row=44)
+    new = ext["setBasicFilter"]["filter"]
+    assert new["range"]["endRowIndex"] == 44 and "criteria" not in new
+    assert new["filterSpecs"] == flt["filterSpecs"] and new["sortSpecs"] == flt["sortSpecs"]
+    assert flt["range"]["endRowIndex"] == 34  # input untouched
+    # rows already within the filter: nothing to do
+    assert google_book._filter_extension(flt, None, 0, last_row=30) is None
+    # inserted inside the filter: Sheets grows it itself (34 -> 37), so 36 is already covered
+    assert google_book._filter_extension(flt, insert_at=10, insert_count=3, last_row=36) is None
+    assert google_book._filter_extension({}, None, 0, last_row=5) is None
 
 
 def test_google_apply_without_insert_sets_default_color_and_borders():
