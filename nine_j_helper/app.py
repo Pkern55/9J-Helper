@@ -270,9 +270,33 @@ class App(tk.Tk):
                                        f"added {result} line(s).")
             self.plan = None
             self.update_btn.configure(state="disabled")
-            self._load_sheet_and_plan()  # refresh so the preview shows them as already on sheet
+            # No re-read of the sheet: it would see the rows we just added as stale unshipped
+            # rows. Show what was done until a new 9J is chosen.
+            self._show_summary(plan, result)
 
         self._run("Updating the Google Sheet…", lambda: google_book.apply(book, plan), done)
+
+    def _show_summary(self, plan, added):
+        """Replace the preview with a record of what the update just did."""
+        self.tree.delete(*self.tree.get_children())
+        for rr in plan.removed:
+            self.tree.insert("", "end", tags=("removed",), values=(
+                rr.tab, rr.part, f"{rr.delivery_date:%m/%d/%Y}" if rr.delivery_date else "",
+                f"{rr.req_qty:g}" if isinstance(rr.req_qty, (int, float)) else (rr.req_qty or ""),
+                "", f"REMOVED (was row {rr.row})"))
+        for pl in plan.lines:
+            if pl.status != NEW:
+                continue
+            ln = pl.line
+            self.tree.insert("", "end", tags=("new",), values=(
+                pl.tab, ln.sheet_part, f"{ln.delivery_date:%m/%d/%Y}", f"{ln.net_qty:g}",
+                ln.firm_plan, f"ADDED at row {pl.row}"))
+        skipped = sum(1 for pl in plan.lines if pl.status == DUPLICATE)
+        self.info_var.set(
+            f"Update complete: removed {plan.removed_count} unshipped row(s), added {added} line(s)"
+            + (f", skipped {skipped} already shipped" if skipped else "")
+            + ". Click Browse to load another 9J.")
+        self.status_var.set("Sheet updated.")
 
 
 def main():
