@@ -21,6 +21,14 @@ NEW = "new"
 DUPLICATE = "already on sheet"
 UNROUTED = "choose a tab"
 
+# The order new rows are written to the sheet. key -> label shown in the window.
+SORTS = {
+    "date": "Delivery date, then part",
+    "part": "Part number, then date",
+    "9j": "Order on the 9J",
+}
+DEFAULT_SORT = "date"
+
 
 # ---------------------------------------------------------------- helpers
 
@@ -209,6 +217,7 @@ class PlannedLine:
     row: Optional[int] = None  # 1-based target row (new lines only)
     candidates: List[str] = field(default_factory=list)
     note: str = ""
+    seq: int = 0  # position of the line on the 9J
 
 
 @dataclass
@@ -302,26 +311,36 @@ def formula_cells(lay: TabLayout, row: int, part: str) -> Dict[int, object]:
     return cells
 
 
-def build_plan(doc: NineJ, tabs: Dict[str, TabState], overrides: Optional[Dict[str, str]] = None) -> Plan:
+def _sort_key(sort: str):
+    if sort == "part":
+        return lambda pl: (part_text(pl.line.sheet_part), pl.line.delivery_date, pl.seq)
+    if sort == "9j":
+        return lambda pl: pl.seq
+    return lambda pl: (pl.line.delivery_date, part_text(pl.line.sheet_part), pl.seq)
+
+
+def build_plan(doc: NineJ, tabs: Dict[str, TabState], overrides: Optional[Dict[str, str]] = None,
+               sort: str = DEFAULT_SORT) -> Plan:
     """Replace mode. For every part on the 9J, that part's unshipped rows (no Shipped Qty, Actual
     Ship Date or P/S) are deleted from its tab and all of its 9J lines are written after the last
     remaining order. Shipped rows are never touched, and a 9J line that matches a shipped row's
     part + date is skipped. Written per new row: Part Number (9J Item #), Delivery Date, Req Qty
-    (9J Net Req Qty) and the formula cells from `formula_cells`."""
+    (9J Net Req Qty) and the formula cells from `formula_cells`. `sort` (a key of SORTS) sets the
+    order the new rows are written in."""
     overrides = overrides or {}
     planned: List[PlannedLine] = []
     seen = set()
-    for ln in doc.lines:
+    for seq, ln in enumerate(doc.lines):
         tab, cands, note = _route(ln, tabs, overrides)
         if tab is None:
-            planned.append(PlannedLine(ln, UNROUTED, candidates=cands, note=note))
+            planned.append(PlannedLine(ln, UNROUTED, candidates=cands, note=note, seq=seq))
             continue
         key = (part_key(ln.sheet_part), to_serial(ln.delivery_date))
         if key in tabs[tab].existing or (tab, key) in seen:
-            planned.append(PlannedLine(ln, DUPLICATE, tab=tab, note=note))
+            planned.append(PlannedLine(ln, DUPLICATE, tab=tab, note=note, seq=seq))
             continue
         seen.add((tab, key))
-        planned.append(PlannedLine(ln, NEW, tab=tab, note=note))
+        planned.append(PlannedLine(ln, NEW, tab=tab, note=note, seq=seq))
 
     writes: Dict[str, TabWrite] = {}
     removed: List[RemovedRow] = []
@@ -332,7 +351,7 @@ def build_plan(doc: NineJ, tabs: Dict[str, TabState], overrides: Optional[Dict[s
         delete = [r for r in st.unshipped_rows if st.row_parts[r] in on_9j]  # ascending
         if not new and not delete:
             continue
-        new.sort(key=lambda pl: (pl.line.delivery_date, part_text(pl.line.sheet_part)))
+        new.sort(key=_sort_key(sort))
         tw = TabWrite(tab=name, date_col=lay.date, part_col=lay.part, delete_rows=delete,
                       expected_deleted={r: st.row_parts[r] for r in delete})
         for r in delete:
@@ -370,3 +389,59 @@ def build_plan(doc: NineJ, tabs: Dict[str, TabState], overrides: Optional[Dict[s
                 tw.text_colors[r] = st.latest_color[k]
         writes[name] = tw
     return Plan(lines=planned, writes=writes, removed=removed)
+
+
+# ---------------------------------------------------------------- what the window shows
+
+ADDED, REMOVED, SKIPPED, NEEDS_TAB = "added", "removed", "skipped", "needs tab"
+_KIND_ORDER = {REMOVED: 0, ADDED: 1, SKIPPED: 2, NEEDS_TAB: 3}
+
+
+@dataclass
+class DisplayRow:
+    kind: str  # ADDED / REMOVED / SKIPPED / NEEDS_TAB
+    tab: str
+    part: str
+    delivery_date: Optional[date]
+    qty: object
+    status: str
+
+
+@dataclass
+class Group:
+    part: str  # "" for the final group of lines that still need a tab
+    rows: List[DisplayRow]
+
+
+def display_groups(plan: Plan, summary: bool = False) -> List[Group]:
+    """Everything the window lists, grouped by part number (one boxed group per part, in part
+    order) and by date inside each group. A removed row sorts just above the line that replaces
+    it. Lines that still need a tab form a last group. `summary` words the status as done."""
+    by_part: Dict[str, List[DisplayRow]] = {}
+    unrouted: List[DisplayRow] = []
+    for rr in plan.removed:
+        txt = f"REMOVED (was row {rr.row})" if summary else f"REMOVE row {rr.row} (not shipped; replaced by the 9J)"
+        by_part.setdefault(part_text(rr.part), []).append(
+            DisplayRow(REMOVED, rr.tab, rr.part, rr.delivery_date, rr.req_qty, txt))
+    for pl in plan.lines:
+        ln = pl.line
+        part = part_text(ln.sheet_part)
+        if pl.status == NEW:
+            txt = f"ADDED at row {pl.row}" if summary else f"new → row {pl.row}"
+            by_part.setdefault(part, []).append(
+                DisplayRow(ADDED, pl.tab, ln.sheet_part, ln.delivery_date, ln.net_qty, txt))
+        elif pl.status == DUPLICATE:
+            by_part.setdefault(part, []).append(
+                DisplayRow(SKIPPED, pl.tab, ln.sheet_part, ln.delivery_date, ln.net_qty,
+                           "skipped (already shipped on sheet)"))
+        else:
+            unrouted.append(DisplayRow(NEEDS_TAB, "", ln.sheet_part, ln.delivery_date, ln.net_qty,
+                                       UNROUTED + " (skipped)"))
+
+    def key(r: DisplayRow):
+        return (r.delivery_date or date.min, _KIND_ORDER[r.kind])
+
+    groups = [Group(part, sorted(rows, key=key)) for part, rows in sorted(by_part.items())]
+    if unrouted:
+        groups.append(Group("", sorted(unrouted, key=lambda r: (part_text(r.part), key(r)))))
+    return groups

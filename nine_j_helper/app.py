@@ -11,7 +11,8 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from . import __version__, config, google_book
 from .nine_j import NineJParseError, parse_pdf
-from .planner import DUPLICATE, NEW, UNROUTED, build_plan
+from .group_table import GroupTable
+from .planner import DEFAULT_SORT, DUPLICATE, SORTS, build_plan, display_groups
 
 TITLE = f"9J Helper {__version__}"
 
@@ -23,6 +24,8 @@ class App(tk.Tk):
         self.geometry("900x560")
         self.minsize(700, 420)
         self.cfg = config.Config.load()
+        if self.cfg.sort_order not in SORTS:
+            self.cfg.sort_order = DEFAULT_SORT
         self.client = None
         self.book = None
         self.tabs = None
@@ -54,23 +57,19 @@ class App(tk.Tk):
         self.info_var = tk.StringVar(value="Click Browse and pick the 9J PDF.")
         ttk.Label(self, textvariable=self.info_var, wraplength=860, justify="left").pack(fill="x", **pad)
 
-        cols = ("tab", "part", "date", "qty", "fp", "status")
-        heads = ("Sheet tab", "Part (Item #)", "Delivery date", "Req qty (Net)", "Firm/Plan", "Status")
-        widths = (170, 110, 100, 70, 70, 260)
-        frame = ttk.Frame(self)
-        frame.pack(fill="both", expand=True, **pad)
-        self.tree = ttk.Treeview(frame, columns=cols, show="headings", selectmode="none")
-        for c, h, w in zip(cols, heads, widths):
-            self.tree.heading(c, text=h)
-            self.tree.column(c, width=w, anchor="w")
-        sb = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=sb.set)
-        self.tree.pack(side="left", fill="both", expand=True)
-        sb.pack(side="right", fill="y")
-        self.tree.tag_configure("new", foreground="#0a6b0a")
-        self.tree.tag_configure("dup", foreground="#777777")
-        self.tree.tag_configure("unrouted", foreground="#b00020")
-        self.tree.tag_configure("removed", foreground="#b00020")
+        order = ttk.Frame(self)
+        order.pack(fill="x", **pad)
+        ttk.Label(order, text="Add rows to the sheet in this order:").pack(side="left")
+        self.sort_var = tk.StringVar(value=SORTS[self.cfg.sort_order])
+        self.sort_cb = ttk.Combobox(order, textvariable=self.sort_var, values=list(SORTS.values()),
+                                    state="readonly", width=28)
+        self.sort_cb.pack(side="left", padx=6)
+        self.sort_cb.bind("<<ComboboxSelected>>", lambda _e: self._on_sort())
+        ttk.Label(order, text="(the list below is always grouped by part)",
+                  foreground="#777777").pack(side="left", padx=6)
+
+        self.table = GroupTable(self)
+        self.table.pack(fill="both", expand=True, **pad)
 
         bottom = ttk.Frame(self)
         bottom.pack(fill="x", **pad)
@@ -90,6 +89,7 @@ class App(tk.Tk):
         self.status_var.set(label)
         self.browse_btn.configure(state="disabled")
         self.update_btn.configure(state="disabled")
+        self.sort_cb.configure(state="disabled")
 
         def worker():
             try:
@@ -104,6 +104,7 @@ class App(tk.Tk):
             while True:
                 done, result, err = self.jobs.get_nowait()
                 self.browse_btn.configure(state="normal")
+                self.sort_cb.configure(state="readonly")
                 self.status_var.set("")
                 done(result, err)
         except queue.Empty:
@@ -187,7 +188,7 @@ class App(tk.Tk):
         self._run("Reading the Google Sheet… (a browser window may open to sign in)", work, done)
 
     def _make_plan(self):
-        self.plan = build_plan(self.doc, self.tabs, self.cfg.part_tabs)
+        self.plan = self._build_plan()
         # Ask about parts we can't place, one question per part.
         asked = set()
         for pl in self.plan.unrouted:
@@ -200,8 +201,20 @@ class App(tk.Tk):
                 self.cfg.part_tabs[part] = choice
         if asked:
             self.cfg.save()
-            self.plan = build_plan(self.doc, self.tabs, self.cfg.part_tabs)
+            self.plan = self._build_plan()
         self._show_plan()
+
+    def _build_plan(self):
+        return build_plan(self.doc, self.tabs, self.cfg.part_tabs, sort=self.cfg.sort_order)
+
+    def _on_sort(self):
+        """New order for the rows written to the sheet: re-plan on the sheet we already read."""
+        key = next((k for k, v in SORTS.items() if v == self.sort_var.get()), DEFAULT_SORT)
+        self.cfg.sort_order = key
+        self.cfg.save()
+        if self.plan is not None and self.doc and self.tabs:
+            self.plan = self._build_plan()
+            self._show_plan()
 
     def _ask_tab(self, part, options, note):
         win = tk.Toplevel(self)
@@ -225,27 +238,7 @@ class App(tk.Tk):
         return result["v"]
 
     def _show_plan(self):
-        self.tree.delete(*self.tree.get_children())
-        for pl in self.plan.lines:
-            ln = pl.line
-            status = pl.status
-            if pl.status == NEW:
-                status = f"new → row {pl.row}" + (
-                    " (after removals)" if self.plan.writes[pl.tab].delete_rows else "")
-                tag = "new"
-            elif pl.status == DUPLICATE:
-                tag = "dup"
-            else:
-                status = UNROUTED + " (skipped)"
-                tag = "unrouted"
-            self.tree.insert("", "end", tags=(tag,), values=(
-                pl.tab or "—", ln.sheet_part, f"{ln.delivery_date:%m/%d/%Y}", f"{ln.net_qty:g}",
-                ln.firm_plan, status))
-        for rr in self.plan.removed:
-            self.tree.insert("", "end", tags=("removed",), values=(
-                rr.tab, rr.part, f"{rr.delivery_date:%m/%d/%Y}" if rr.delivery_date else "",
-                f"{rr.req_qty:g}" if isinstance(rr.req_qty, (int, float)) else (rr.req_qty or ""),
-                "", f"REMOVE row {rr.row} (not shipped; replaced by the 9J)"))
+        self.table.show(display_groups(self.plan), summary=False)
         n, gone = self.plan.new_count, self.plan.removed_count
         dup = sum(1 for pl in self.plan.lines if pl.status == DUPLICATE)
         self.status_var.set(f"{n} line(s) to add, {gone} unshipped row(s) to remove, "
@@ -277,20 +270,10 @@ class App(tk.Tk):
         self._run("Updating the Google Sheet…", lambda: google_book.apply(book, plan), done)
 
     def _show_summary(self, plan, added):
-        """Replace the preview with a record of what the update just did."""
-        self.tree.delete(*self.tree.get_children())
-        for rr in plan.removed:
-            self.tree.insert("", "end", tags=("removed",), values=(
-                rr.tab, rr.part, f"{rr.delivery_date:%m/%d/%Y}" if rr.delivery_date else "",
-                f"{rr.req_qty:g}" if isinstance(rr.req_qty, (int, float)) else (rr.req_qty or ""),
-                "", f"REMOVED (was row {rr.row})"))
-        for pl in plan.lines:
-            if pl.status != NEW:
-                continue
-            ln = pl.line
-            self.tree.insert("", "end", tags=("new",), values=(
-                pl.tab, ln.sheet_part, f"{ln.delivery_date:%m/%d/%Y}", f"{ln.net_qty:g}",
-                ln.firm_plan, f"ADDED at row {pl.row}"))
+        """Replace the preview with a record of what the update just did (green = added,
+        red = removed)."""
+        self.table.show(display_groups(plan, summary=True), summary=True)
+        self.sort_cb.configure(state="disabled")  # the sheet is already written
         skipped = sum(1 for pl in plan.lines if pl.status == DUPLICATE)
         self.info_var.set(
             f"Update complete: removed {plan.removed_count} unshipped row(s), added {added} line(s)"

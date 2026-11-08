@@ -17,12 +17,21 @@ Reads a Hendrickson **9J Supplier Schedule** PDF and updates the orders Google S
    - A browser window opens to sign in to Google. You'll see *"Google hasn't verified this app"*:
      click **Advanced → Go to 9J Helper (unsafe)** and then **Continue**. (It's our own app;
      it only gets access to Google Sheets.)
-5. Look over the list:
+5. Look over the list. It is grouped by part, with **one thick box around each part's rows**
+   (all the 010545-1 lines together, and so on) and each box in date order, so you can check the
+   app's work at a glance:
    - **green "new → row 35"**: will be added at that row
    - **red "REMOVE row 33"**: an old row that hasn't shipped; it is deleted and replaced by the 9J
-   - **grey "already on sheet"**: that part + delivery date already **shipped**, so it's skipped
+     (it sits just above the line that replaces it)
+   - **grey "skipped"**: that part + delivery date already **shipped**, so it's left alone
    - **red "choose a tab"**: the app didn't know which tab; it asks you, and remembers next time
+
+   Use **Add rows to the sheet in this order** to pick how the new rows are written to the sheet:
+   *Delivery date, then part* (default), *Part number, then date*, or *Order on the 9J*. The list
+   stays grouped by part either way; the row numbers in it update to match. Your choice is remembered.
 6. Click **Update Sheet**, then **Yes**.
+7. The list then turns into a summary of what was done: **green rows were added, red rows were
+   removed**. It stays until you pick another 9J with **Browse…**.
 
 ### How it updates the sheet (replace mode)
 The 9J is the newest word on what's still owed, so for **every part that is on the 9J**:
@@ -112,7 +121,7 @@ holding `Example 9J\...pdf` and `Copy of HAUX - RMKCo.xlsx`:
 Dry run against an Excel export of the sheet (never modifies the export):
 
 ```
-.venv\Scripts\python -m nine_j_helper.cli "path\to\9J.pdf" "Copy of HAUX - RMKCo.xlsx" --out preview.xlsx
+.venv\Scripts\python -m nine_j_helper.cli "path\to\9J.pdf" "Copy of HAUX - RMKCo.xlsx" [--sort date|part|9j] --out preview.xlsx
 ```
 
 Code layout:
@@ -120,8 +129,9 @@ Code layout:
 | File | Purpose |
 |---|---|
 | `nine_j_helper/nine_j.py` | PDF → header, items, schedule lines |
-| `nine_j_helper/planner.py` | finds order tabs/columns, routes parts, skips duplicates, picks rows |
+| `nine_j_helper/planner.py` | finds order tabs/columns, routes parts, skips duplicates, picks rows, sort order, groups for the list |
 | `nine_j_helper/google_book.py` | Google sign-in, reading tabs, writing the plan |
 | `nine_j_helper/xlsx_book.py` | same against a local .xlsx (tests / dry runs) |
 | `nine_j_helper/app.py` | the window |
+| `nine_j_helper/group_table.py` | the boxed, color-filled list in the window |
 | `nine_j_helper/config.py` | settings in `%APPDATA%\9J Helper` |

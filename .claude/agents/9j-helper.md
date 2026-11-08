@@ -75,7 +75,8 @@ For each 9J line:
 3. **Skip duplicates:** a 9J line with the same part + date as a **shipped** row → "already on sheet".
    (Unshipped matches are replaced, not duplicates.)
 4. **Write into the next "x" rows** (post-delete numbering; insert rows after the x rows if they run
-   out). New rows are sorted by date, then part:
+   out). New rows are written in the user's chosen order (`planner.SORTS`: `date` = date then part
+   (default), `part` = part then date, `9j` = order printed on the 9J; saved as `sort_order` in config):
    - Part Number ← the 9J block's **Hendrickson Item #** (`ScheduleLine.sheet_part`), not the line's Part column
    - Delivery Date ← Delivery Date
    - Req Qty ← **Net Req Qty** (`net_qty`)
@@ -104,6 +105,9 @@ For each 9J line:
   color-only → updateBorders, then values batch-update USER_ENTERED). `_cell_value` sends dates
   as `m/d/yyyy` text and prefixes numeric-looking text with `'` (keeps `009956`'s zeros).
 - `xlsx_book.py`: same reads/writes against an .xlsx (dry runs/tests).
+- `group_table.py`: `GroupTable` Canvas widget (thick box per part group; summary fills green added /
+  red removed), fed by `planner.display_groups(plan, summary)`. The sort dropdown re-plans on the
+  already-loaded sheet. No Firm/Plan column in the GUI (the parser still has it).
 - `app.py`: Tkinter UI, background thread for Google calls. `config.py`: settings in
   `%APPDATA%\9J Helper\` (`config.json` = sheet ID/title, part→tab choices, last folder;
   `token.json` = Google sign-in; `client_secret.json` may also live here).

@@ -499,3 +499,140 @@ def test_xlsx_apply_deletes_rows_and_translates_formulas_below(tmp_path):
     assert out.cell(4, 1).value == "010545-1" and out.cell(4, 5).value == "=WORKDAY(C4,-2)"  # new, in x row
     assert out.cell(4, 11).value == "010545-1" and out.cell(4, 4).value == 28.0
     assert openpyxl.load_workbook(src)["Machined Only"].cell(3, 1).value == "010545-1"  # source untouched
+
+
+# ------------------------------------------------------------------ sort order
+
+def _written(plan, tab="Machined Only"):
+    """[(row, part, date)] of the new rows, in sheet-row order."""
+    tw = plan.writes[tab]
+    return [(r, tw.rows[r][0], tw.rows[r][2]) for r in sorted(tw.rows)]
+
+
+def test_sort_orders_decide_which_row_each_line_gets():
+    doc = parse_text(SAMPLE_TEXT)
+    tabs = planner.load_tabs(fake_rows())
+    ov = {"NEWPART-9": "Machined Only"}
+    by_date = _written(planner.build_plan(doc, tabs, ov, sort="date"))
+    assert [d for _, _, d in by_date] == sorted(d for _, _, d in by_date)
+    by_part = _written(planner.build_plan(doc, tabs, ov, sort="part"))
+    assert [p for _, p, _ in by_part] == ["010545-1"] * 3 + ["NEWPART-9"]
+    in_9j = _written(planner.build_plan(doc, tabs, ov, sort="9j"))
+    assert [(p, d) for _, p, d in in_9j] == [
+        ("010545-1", date(2026, 10, 28)), ("010545-1", date(2026, 11, 4)),
+        ("010545-1", date(2027, 1, 4)), ("NEWPART-9", date(2026, 12, 1))]
+    # unknown sort keys fall back to date order, and formulas always follow the row number
+    plan = planner.build_plan(doc, tabs, ov, sort="bogus")
+    assert _written(plan) == by_date
+    for r, cells in plan.writes["Machined Only"].rows.items():
+        assert cells[4] == f"=WORKDAY(C{r},-2)"
+
+
+def test_sort_by_part_vs_date_differ_with_interleaved_parts():
+    text = SAMPLE_TEXT.replace("Weekly 12/01/26 NP9-REF ADDED 11/1 F", "Weekly 11/01/26 NP9-REF ADDED 11/1 F")
+    doc = parse_text(text)
+    tabs = planner.load_tabs(fake_rows())
+    ov = {"NEWPART-9": "Machined Only"}
+    date_order = [p for _, p, _ in _written(planner.build_plan(doc, tabs, ov, sort="date"))]
+    part_order = [p for _, p, _ in _written(planner.build_plan(doc, tabs, ov, sort="part"))]
+    assert date_order == ["010545-1", "NEWPART-9", "010545-1", "010545-1"]  # NEWPART-9 dated 11/1
+    assert part_order == ["010545-1", "010545-1", "010545-1", "NEWPART-9"]
+
+
+def test_config_remembers_sort_order(tmp_path, monkeypatch):
+    from nine_j_helper import config
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    c = config.Config.load()
+    assert c.sort_order == "date"
+    c.sort_order = "part"
+    c.save()
+    assert config.Config.load().sort_order == "part"
+
+
+# ------------------------------------------------------------------ what the window shows
+
+def test_display_groups_one_group_per_part_in_date_order():
+    doc = parse_text(SAMPLE_TEXT)
+    plan = planner.build_plan(doc, planner.load_tabs(fake_rows()))
+    groups = planner.display_groups(plan)
+    assert [g.part for g in groups] == ["010545-1", ""]  # then lines that still need a tab
+    g = groups[0]
+    # the removed unshipped 10/28 row sits right above the line that replaces it
+    assert [(r.kind, r.delivery_date) for r in g.rows][:2] == [
+        (planner.REMOVED, date(2026, 10, 28)), (planner.ADDED, date(2026, 10, 28))]
+    assert [r.delivery_date for r in g.rows] == sorted(r.delivery_date for r in g.rows)
+    assert g.rows[0].status == "REMOVE row 4 (not shipped; replaced by the 9J)"
+    assert groups[1].rows[0].kind == planner.NEEDS_TAB and groups[1].rows[0].part == "NEWPART-9"
+    summary = planner.display_groups(plan, summary=True)
+    assert summary[0].rows[0].status == "REMOVED (was row 4)"
+    assert summary[0].rows[1].status.startswith("ADDED at row ")
+
+
+def test_display_groups_shows_skipped_shipped_lines_and_sorts_parts():
+    text = SAMPLE_TEXT.replace("Daily 10/28/26", "Daily 10/14/26")  # matches the shipped row 3
+    plan = planner.build_plan(parse_text(text), planner.load_tabs(fake_rows()), {"NEWPART-9": "S-Beams"})
+    groups = planner.display_groups(plan)
+    assert [g.part for g in groups] == ["010545-1", "NEWPART-9"]
+    assert planner.SKIPPED in [r.kind for r in groups[0].rows]
+
+
+@pytest.fixture(scope="module")
+def gui(tmp_path_factory):
+    """One real (hidden) app window shared by the GUI tests: Tk in this venv on Windows can fail
+    to initialise when a second window is created after the first was destroyed."""
+    old = os.environ.get("APPDATA")
+    os.environ["APPDATA"] = str(tmp_path_factory.mktemp("appdata"))
+    from nine_j_helper import app as app_mod
+    try:
+        a = app_mod.App()
+    except Exception as e:  # noqa: BLE001 - no display / no Tk
+        if old is None:
+            os.environ.pop("APPDATA", None)
+        else:
+            os.environ["APPDATA"] = old
+        pytest.skip(f"cannot open window: {e}")
+    a.withdraw()
+    yield a
+    a.destroy()
+    if old is None:
+        os.environ.pop("APPDATA", None)
+    else:
+        os.environ["APPDATA"] = old
+
+
+def test_group_table_draws_boxes_and_summary_fills(gui):
+    from nine_j_helper.group_table import BOX_W, GroupTable
+    plan = planner.build_plan(parse_text(SAMPLE_TEXT), planner.load_tabs(fake_rows()))
+    t = GroupTable(gui)
+    t.pack(fill="both", expand=True)
+    gui.geometry("900x400")
+    gui.update()
+    t.show(planner.display_groups(plan))
+    gui.update()
+    boxes = [i for i in t.body.find_all()
+             if t.body.type(i) == "rectangle" and float(t.body.itemcget(i, "width")) == BOX_W]
+    assert len(boxes) == 2  # one per group (010545-1, needs-a-tab)
+    t.show(planner.display_groups(plan, summary=True), summary=True)
+    gui.update()
+    fills = {t.body.itemcget(i, "fill") for i in t.body.find_all() if t.body.type(i) == "rectangle"}
+    assert {"#c6efce", "#ffc7ce"} <= fills  # green added, red removed
+    assert len(t.head.find_all()) == 5  # no Firm/Plan column
+    t.destroy()
+
+
+def test_app_sort_dropdown_replans_and_summary_disables_it(gui):
+    a = gui
+    a.doc = parse_text(SAMPLE_TEXT)
+    a.tabs = planner.load_tabs(fake_rows())
+    a.cfg.part_tabs["NEWPART-9"] = "Machined Only"
+    a._make_plan()
+    assert a.plan.writes["Machined Only"].rows and a.cfg.sort_order == "date"
+    for key, label in planner.SORTS.items():
+        a.sort_var.set(label)
+        a._on_sort()
+        assert a.cfg.sort_order == key
+    # last choice was "9j": lines are written in the order printed on the 9J
+    assert [p for _, p, _ in _written(a.plan)] == ["010545-1"] * 3 + ["NEWPART-9"]
+    a._show_summary(a.plan, 4)
+    assert str(a.sort_cb.cget("state")) == "disabled"
+    assert "Update complete" in a.info_var.get()
