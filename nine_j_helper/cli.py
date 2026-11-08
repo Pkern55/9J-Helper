@@ -13,7 +13,7 @@ from .planner import build_plan
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="Preview what a 9J would add to the sheet.")
+    ap = argparse.ArgumentParser(description="Preview how a 9J would update the sheet.")
     ap.add_argument("pdf")
     ap.add_argument("xlsx", help="Excel export of the Google Sheet (read only)")
     ap.add_argument("--out", help="write the result to this NEW .xlsx file")
@@ -28,6 +28,10 @@ def main(argv=None):
         where = f"{pl.tab} row {pl.row}" if pl.row else (pl.tab or ", ".join(pl.candidates))
         print(f"  {ln.sheet_part:<12} {ln.delivery_date:%m/%d/%Y} {ln.net_qty:>8g} {ln.firm_plan:<3} "
               f"{pl.status:<17} {where}  {pl.note}")
+    for rr in plan.removed:
+        d = f"{rr.delivery_date:%m/%d/%Y}" if rr.delivery_date else "-"
+        print(f"  REMOVE {rr.part:<12} {d} {rr.req_qty!s:>8}  {rr.tab} row {rr.row} (unshipped)")
+    print(f"{plan.new_count} line(s) to add, {plan.removed_count} unshipped row(s) to remove")
     if args.out:
         xlsx_book.apply(plan, args.xlsx, args.out)
         print(f"Wrote {args.out}")

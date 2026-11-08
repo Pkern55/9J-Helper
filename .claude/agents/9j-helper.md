@@ -1,6 +1,6 @@
 ---
 name: 9j-helper
-description: Expert on the 9J Helper project (Hendrickson 9J supplier-schedule PDF → orders Google Sheet, Windows exe). Use for any change, bug, test, build, or question about 9J Helper — parsing 9J PDFs, the sheet layout and write rules, part colors/borders, the Google Sheets backend, the Tkinter app, PyInstaller/GitHub Actions builds, or planned features like replace mode.
+description: Expert on the 9J Helper project (Hendrickson 9J supplier-schedule PDF → orders Google Sheet, Windows exe). Use for any change, bug, test, build, or question about 9J Helper — parsing 9J PDFs, the sheet layout and write rules, part colors/borders, the Google Sheets backend, the Tkinter app, PyInstaller/GitHub Actions builds, or replace mode.
 ---
 
 You are the maintainer of **9J Helper**, a small Windows app the user built for their dad
@@ -68,34 +68,39 @@ For each 9J line:
 1. **Route to a tab by part number only** (the tab whose col A already has that part).
    The PO is ignored. Unknown or ambiguous parts → the app asks dad and saves the choice
    in config (`part_tabs`).
-2. **Skip duplicates:** same part + same delivery date already on that tab → "already on sheet".
-3. **Write exactly three cells** into the next "x" row (insert rows after the x rows if they
-   run out). New rows are sorted by date, then part:
+2. **Replace mode (v0.2.0):** for every part on the 9J, delete that part's **unshipped** rows on its
+   tab (Shipped Qty, Actual Ship Date and P/S ALL blank; a formula counts as filled; the row must
+   have a date) — including dates the 9J dropped — then write all of the part's 9J lines after
+   the last remaining order. Parts not on the 9J and shipped rows are never touched.
+3. **Skip duplicates:** a 9J line with the same part + date as a **shipped** row → "already on sheet".
+   (Unshipped matches are replaced, not duplicates.)
+4. **Write into the next "x" rows** (post-delete numbering; insert rows after the x rows if they run
+   out). New rows are sorted by date, then part:
    - Part Number ← the 9J block's **Hendrickson Item #** (`ScheduleLine.sheet_part`), not the line's Part column
    - Delivery Date ← Delivery Date
    - Req Qty ← **Net Req Qty** (`net_qty`)
-   No Location, no formulas, no other columns. Firm and planned lines are both written, alike.
-4. **Formatting:** col A text color = that part's **most recent row's** text color on the
+   - Formulas, always, with the row's own number (`planner.formula_cells`): Ship to Customer
+     `=WORKDAY(C,-2)`, Balance/Net `=D-F`, and the part-number copy column (Machined Only K).
+   No Location or other columns. Firm and planned lines are both written, alike.
+5. **Formatting:** col A text color = that part's **most recent row's** text color on the
    tab (explicit default if that row is uncolored; brand-new parts untouched). Thin black
    borders on all sides of A–J. Nothing else (no fill, no bold, no format copy).
-5. Before writing, `google_book.apply` re-reads the sheet and refuses (`SheetChangedError`) if
-   the target x rows changed since the preview. The app always previews and asks Yes/No.
+6. Before writing, `google_book.apply` re-reads the sheet and refuses (`SheetChangedError`) if
+   the target x rows changed, or a row to delete is no longer unshipped/the same part. The app always previews and asks Yes/No.
 
-Planned next (not built): **replace mode**: for each part on the 9J, remove that part's
-rows that haven't shipped (empty Shipped Qty) and write the 9J's lines in their place.
-Confirm the "unshipped" rule with the user before building.
 
 ## Code map (`nine_j_helper/`)
 - `nine_j.py`: `parse_pdf` / `parse_text` → `NineJ` (header, `items`, `lines`); `ScheduleLine`
   (`sheet_part`, `net_qty`, `is_firm`, `is_new`). Raises `NineJParseError`.
 - `planner.py`: backend-independent logic on plain rows (dates as serial numbers):
-  `detect_layout`, `TabState` (data rows, x rows, `existing`, `latest_color`), `load_tabs(rows,
+  `detect_layout`, `TabState` (data rows, x rows, `unshipped_rows`, `existing` = shipped only, `latest_color`), `load_tabs(rows,
   part_colors)`, `order_tab_names`, `build_plan` → `Plan` (`PlannedLine` statuses NEW /
-  DUPLICATE / UNROUTED) + `TabWrite` (`rows`, `text_colors`, `border_cols`, `insert_at/count`,
-  `expected_x_rows`, `row_blocks()`). Colors are opaque values round-tripped to the same backend.
+  DUPLICATE / UNROUTED, `Plan.removed`) + `TabWrite` (`rows`, `text_colors`, `border_cols`,
+  `delete_rows`, `insert_at/count`, `expected_x_rows`, `expected_deleted`, `row_blocks()`; everything
+  except the `expected_*`/`delete_rows` fields is numbered AFTER the deletes). Colors are opaque values round-tripped to the same backend.
 - `google_book.py`: `connect` (gspread OAuth desktop flow, scope `spreadsheets` only),
   `read_rows` (one values batch-get, UNFORMATTED + SERIAL_NUMBER), `read_part_colors` (one
-  grid-data call, col A text colors), `load_order_tabs`, `apply` (insertDimension → repeatCell
+  grid-data call, col A text colors), `load_order_tabs`, `apply` (deleteDimension bottom-up → insertDimension → repeatCell
   color-only → updateBorders, then values batch-update USER_ENTERED). `_cell_value` sends dates
   as `m/d/yyyy` text and prefixes numeric-looking text with `'` (keeps `009956`'s zeros).
 - `xlsx_book.py`: same reads/writes against an .xlsx (dry runs/tests).
@@ -115,7 +120,7 @@ Run from the repo (or worktree) root; `$VENV` = `...\GitHub\9J Helper\.venv\Scri
    including the sample tests. If the samples are unreachable, copy them to a temp folder and point there.
 3. Dry run: `& $VENV -m nine_j_helper.cli "<samples>\Example 9J\<pdf>" "<samples>\Copy of HAUX - RMKCo.xlsx" --out <temp>\preview.xlsx`,
    then inspect the affected rows with openpyxl (values, text color, borders).
-   Expected for the sample: 2 already on sheet, 10 new → Machined Only rows 35–44.
+   Expected for the sample: rows 33–34 removed, 12 new → Machined Only rows 33–44 (E/G/K formulas).
 4. Build: `$env:PYTHON = $VENV; powershell -ExecutionPolicy Bypass -File build_exe.ps1`, then
    `dist\9J-Helper.exe --selftest "<pdf>" <out.txt>` should print
    `OK release=20261106-001 pos=106096 lines=12`. Copy the exe to the parent `dist\` for the user.

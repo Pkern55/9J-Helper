@@ -1,7 +1,7 @@
 # 9J Helper
 
-Reads a Hendrickson **9J Supplier Schedule** PDF and adds its lines to the orders Google Sheet
-(e.g. "HAUX - RMKCo"). No Python needed: it's a single Windows program.
+Reads a Hendrickson **9J Supplier Schedule** PDF and updates the orders Google Sheet
+(e.g. "HAUX - RMKCo") with the latest schedule. No Python needed: it's a single Windows program.
 
 ## For Dad: using it
 
@@ -19,29 +19,44 @@ Reads a Hendrickson **9J Supplier Schedule** PDF and adds its lines to the order
      it only gets access to Google Sheets.)
 5. Look over the list:
    - **green "new → row 35"**: will be added at that row
-   - **grey "already on sheet"**: that part + delivery date is already there, so it's skipped
+   - **red "REMOVE row 33"**: an old row that hasn't shipped; it is deleted and replaced by the 9J
+   - **grey "already on sheet"**: that part + delivery date already **shipped**, so it's skipped
    - **red "choose a tab"**: the app didn't know which tab; it asks you, and remembers next time
 6. Click **Update Sheet**, then **Yes**.
 
-### What it writes
-For each new line it fills the next **"x" row** on the matching tab (adding rows if the x rows run
-out) with just three cells:
+### How it updates the sheet (replace mode)
+The 9J is the newest word on what's still owed, so for **every part that is on the 9J**:
 
-| Sheet column | Comes from the 9J |
+1. Its **unshipped rows** are deleted from that part's tab. A row is unshipped when **Shipped Qty,
+   Actual Ship Date and P/S are all empty** (anything typed in any of them, even a formula, means
+   it has shipped and the row is kept). This includes dates the new 9J no longer lists.
+2. **All of that part's 9J lines** are added after the last remaining order (into the "x" rows,
+   adding rows if they run out), sorted by date, then part.
+
+Rows for parts that are **not** on the 9J, and every shipped row, are never touched. A 9J line with
+the same part and date as a shipped row is skipped.
+
+### What it writes
+Each added row gets:
+
+| Sheet column | Value |
 |---|---|
 | Part Number | **Hendrickson Item #** |
 | Delivery Date | Delivery Date |
 | Req Qty | **Net Req Qty** |
+| Ship to Customer | `=WORKDAY(C<row>,-2)` |
+| Balance Due / Net Req Qty | `=D<row>-F<row>` |
+| part number (Machined Only, col K) | the part number again |
 
-Everything else (Location, Ship to Customer, Shipped Qty, Net/Balance, ship dates, comments) is
-left for you. Firm and planned lines are both added.
+Everything else (Location, Shipped Qty, ship dates, P/S, comments) is left for you. Firm and
+planned lines are both added.
 
 Formatting on new rows:
 - The **Part Number text color** matches that part's most recent row on the tab (e.g. 010545-2
   stays blue). Brand-new parts keep the default color. Background and bold aren't changed.
 - Columns **A–J get thin black borders** on all sides, like the rest of the order rows.
 - The tab's **sort/filter range grows to include the new rows**, so they sort and filter with
-  the rest of the table. (Your existing filter settings are kept.)
+  the rest of the table. (Your existing filter settings are kept; deleting rows shrinks it first, then it is grown back.)
 
 Tabs are matched by part number only (the tab that already has that part). The PO number is
 ignored. For a part that isn't on any tab yet, the app asks which tab to use and remembers it.
@@ -110,8 +125,3 @@ Code layout:
 | `nine_j_helper/xlsx_book.py` | same against a local .xlsx (tests / dry runs) |
 | `nine_j_helper/app.py` | the window |
 | `nine_j_helper/config.py` | settings in `%APPDATA%\9J Helper` |
-
-## Planned next
-
-Replace mode: for each part on the 9J, remove that part's rows that haven't shipped and put the
-9J's lines in their place.

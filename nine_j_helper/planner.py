@@ -6,6 +6,7 @@ logic runs against Google Sheets or a local .xlsx export.
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -74,6 +75,15 @@ def _blank(v) -> bool:
     return v is None or (isinstance(v, str) and not v.strip())
 
 
+def is_unshipped(row: Sequence, lay: "TabLayout") -> bool:
+    """An order row with no Shipped Qty, Actual Ship Date or P/S (a formula counts as filled).
+    Tabs without a Shipped Qty column never report unshipped rows, so nothing is deleted there."""
+    if lay.shipped is None:
+        return False
+    cols = [c for c in (lay.shipped, lay.actual_date, lay.ps) if c is not None]
+    return all(_blank(_cell(row, c)) for c in cols)
+
+
 # ---------------------------------------------------------------- tab layout
 
 @dataclass
@@ -88,6 +98,8 @@ class TabLayout:
     shipped: Optional[int] = None
     net: Optional[int] = None
     part_copy: Optional[int] = None
+    actual_date: Optional[int] = None
+    ps: Optional[int] = None
     width: int = 0
 
 
@@ -112,6 +124,10 @@ def detect_layout(name: str, rows: List[List]) -> Optional[TabLayout]:
                 lay.ship_to = i
             elif t.startswith("shipped"):
                 lay.shipped = i
+            elif t.startswith("actual"):
+                lay.actual_date = i
+            elif t in ("p/s", "ps"):
+                lay.ps = i
             elif t in ("net req qty", "balance due") and lay.net is None:
                 lay.net = i
             elif t == "part number" and lay.part_copy is None:
@@ -126,7 +142,12 @@ class TabState:
     rows: List[List]
     data_rows: List[int] = field(default_factory=list)  # 1-based sheet rows with orders
     x_rows: List[int] = field(default_factory=list)  # 1-based placeholder rows
-    existing: set = field(default_factory=set)  # {(part_key, serial)}
+    # {(part_key, serial)} of SHIPPED rows only. Unshipped rows get replaced by the 9J, so they
+    # never count as "already on sheet".
+    existing: set = field(default_factory=set)
+    # Orders with no Shipped Qty, Actual Ship Date or P/S: the rows replace mode may delete.
+    unshipped_rows: List[int] = field(default_factory=list)
+    row_parts: Dict[int, str] = field(default_factory=dict)  # data row -> part_key
     parts: set = field(default_factory=set)
     # Part Number text color of each part's most recent row (None = default/black).
     latest_color: Dict[str, object] = field(default_factory=dict)
@@ -147,9 +168,12 @@ class TabState:
             st.data_rows.append(r + 1)
             k = part_key(p)
             st.parts.add(k)
+            st.row_parts[r + 1] = k
             st.latest_color[k] = colors.get(r + 1)  # later rows overwrite earlier ones
             s = serial_of(_cell(row, layout.date))
-            if s is not None:
+            if s is not None and is_unshipped(row, layout):
+                st.unshipped_rows.append(r + 1)
+            elif s is not None:
                 st.existing.add((k, s))
         return st
 
@@ -200,6 +224,12 @@ class TabWrite:
     # are absent, so their text color is left alone.
     text_colors: Dict[int, object] = field(default_factory=dict)
     border_cols: int = BORDER_COLS  # new rows get thin borders on columns A..(A+border_cols-1)
+    # Replace mode. Deletes run first, so `rows`, `insert_at` and `last_data_row` are numbered
+    # AFTER the deletions; `delete_rows`, `expected_deleted` and `expected_x_rows` are numbered
+    # as the sheet is now (before anything is written).
+    delete_rows: List[int] = field(default_factory=list)  # unshipped rows to remove, ascending
+    expected_deleted: Dict[int, str] = field(default_factory=dict)  # row -> part_key, re-checked
+    last_data_row: int = 0  # last order row that stays (header row if none)
 
     def row_blocks(self) -> List[Tuple[int, int]]:
         """Consecutive runs of new rows as (first_row, last_row), 1-based inclusive."""
@@ -213,13 +243,32 @@ class TabWrite:
 
 
 @dataclass
+class RemovedRow:
+    """An unshipped sheet row that the 9J replaces (shown in the preview)."""
+    tab: str
+    row: int  # 1-based, as the sheet is now
+    part: str
+    delivery_date: Optional[date]
+    req_qty: object
+
+
+@dataclass
 class Plan:
     lines: List[PlannedLine]
     writes: Dict[str, TabWrite]
+    removed: List[RemovedRow] = field(default_factory=list)
 
     @property
     def new_count(self) -> int:
         return sum(1 for pl in self.lines if pl.status == NEW)
+
+    @property
+    def removed_count(self) -> int:
+        return len(self.removed)
+
+    @property
+    def has_changes(self) -> bool:
+        return bool(self.writes)
 
     @property
     def unrouted(self) -> List[PlannedLine]:
@@ -239,8 +288,26 @@ def _route(line: ScheduleLine, tabs: Dict[str, TabState], overrides: Dict[str, s
     return None, list(tabs), "new part"
 
 
+def formula_cells(lay: TabLayout, row: int, part: str) -> Dict[int, object]:
+    """The helper cells every order row carries, written with the row's own number:
+    Ship to Customer (=WORKDAY(date,-2)), Balance/Net (=Req-Shipped) and, on tabs that have one,
+    the extra part-number column. Columns a tab doesn't have are skipped."""
+    cells: Dict[int, object] = {}
+    if lay.ship_to is not None:
+        cells[lay.ship_to] = f"=WORKDAY({col_letter(lay.date)}{row},-2)"
+    if lay.net is not None and lay.req is not None and lay.shipped is not None:
+        cells[lay.net] = f"={col_letter(lay.req)}{row}-{col_letter(lay.shipped)}{row}"
+    if lay.part_copy is not None:
+        cells[lay.part_copy] = part
+    return cells
+
+
 def build_plan(doc: NineJ, tabs: Dict[str, TabState], overrides: Optional[Dict[str, str]] = None) -> Plan:
-    """Only Part Number (9J Item #), Delivery Date and Req Qty (9J Net Req Qty) are written."""
+    """Replace mode. For every part on the 9J, that part's unshipped rows (no Shipped Qty, Actual
+    Ship Date or P/S) are deleted from its tab and all of its 9J lines are written after the last
+    remaining order. Shipped rows are never touched, and a 9J line that matches a shipped row's
+    part + date is skipped. Written per new row: Part Number (9J Item #), Delivery Date, Req Qty
+    (9J Net Req Qty) and the formula cells from `formula_cells`."""
     overrides = overrides or {}
     planned: List[PlannedLine] = []
     seen = set()
@@ -257,31 +324,49 @@ def build_plan(doc: NineJ, tabs: Dict[str, TabState], overrides: Optional[Dict[s
         planned.append(PlannedLine(ln, NEW, tab=tab, note=note))
 
     writes: Dict[str, TabWrite] = {}
+    removed: List[RemovedRow] = []
     for name, st in tabs.items():
+        lay = st.layout
         new = [pl for pl in planned if pl.status == NEW and pl.tab == name]
-        if not new:
+        on_9j = {part_key(pl.line.sheet_part) for pl in planned if pl.tab == name}
+        delete = [r for r in st.unshipped_rows if st.row_parts[r] in on_9j]  # ascending
+        if not new and not delete:
             continue
         new.sort(key=lambda pl: (pl.line.delivery_date, part_text(pl.line.sheet_part)))
-        lay = st.layout
-        tw = TabWrite(tab=name, date_col=lay.date, part_col=lay.part)
-        slots = list(st.x_rows[: len(new)])
-        tw.expected_x_rows = list(slots)
+        tw = TabWrite(tab=name, date_col=lay.date, part_col=lay.part, delete_rows=delete,
+                      expected_deleted={r: st.row_parts[r] for r in delete})
+        for r in delete:
+            row = st.rows[r - 1]
+            removed.append(RemovedRow(name, r, part_text(_cell(row, lay.part)),
+                                      from_serial(_cell(row, lay.date)), _cell(row, lay.req)))
+
+        def after_delete(r: int) -> int:  # sheet row r (not deleted) -> its row once deletes ran
+            return r - bisect_left(delete, r)
+
+        gone = set(delete)
+        kept = [r for r in st.data_rows if r not in gone]
+        last_data = after_delete(kept[-1]) if kept else lay.header_row
+        tw.last_data_row = last_data
+        x_slots = [after_delete(r) for r in st.x_rows[: len(new)]]
+        tw.expected_x_rows = list(st.x_rows[: len(new)])
+        slots = list(x_slots)
         overflow = len(new) - len(slots)
         if overflow > 0:
-            after = st.x_rows[-1] if st.x_rows else (st.last_data_row or lay.header_row)
+            after = after_delete(st.x_rows[-1]) if st.x_rows else last_data
             tw.insert_at = after + 1
             tw.insert_count = overflow
             slots += list(range(after + 1, after + 1 + overflow))
         for pl, r in zip(new, slots):
             pl.row = r
+            part = part_text(pl.line.sheet_part)
             # Dates stay `date` objects; each backend writes them in its own way.
-            cells: Dict[int, object] = {lay.part: part_text(pl.line.sheet_part),
-                                        lay.date: pl.line.delivery_date}
+            cells: Dict[int, object] = {lay.part: part, lay.date: pl.line.delivery_date}
             if lay.req is not None:
                 cells[lay.req] = pl.line.net_qty
+            cells.update(formula_cells(lay, r, part))
             tw.rows[r] = cells
             k = part_key(pl.line.sheet_part)
             if k in st.latest_color:
                 tw.text_colors[r] = st.latest_color[k]
         writes[name] = tw
-    return Plan(lines=planned, writes=writes)
+    return Plan(lines=planned, writes=writes, removed=removed)

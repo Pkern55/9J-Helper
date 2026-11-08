@@ -70,6 +70,7 @@ class App(tk.Tk):
         self.tree.tag_configure("new", foreground="#0a6b0a")
         self.tree.tag_configure("dup", foreground="#777777")
         self.tree.tag_configure("unrouted", foreground="#b00020")
+        self.tree.tag_configure("removed", foreground="#b00020")
 
         bottom = ttk.Frame(self)
         bottom.pack(fill="x", **pad)
@@ -229,7 +230,8 @@ class App(tk.Tk):
             ln = pl.line
             status = pl.status
             if pl.status == NEW:
-                status = f"new → row {pl.row}"
+                status = f"new → row {pl.row}" + (
+                    " (after removals)" if self.plan.writes[pl.tab].delete_rows else "")
                 tag = "new"
             elif pl.status == DUPLICATE:
                 tag = "dup"
@@ -239,16 +241,24 @@ class App(tk.Tk):
             self.tree.insert("", "end", tags=(tag,), values=(
                 pl.tab or "—", ln.sheet_part, f"{ln.delivery_date:%m/%d/%Y}", f"{ln.net_qty:g}",
                 ln.firm_plan, status))
-        n = self.plan.new_count
+        for rr in self.plan.removed:
+            self.tree.insert("", "end", tags=("removed",), values=(
+                rr.tab, rr.part, f"{rr.delivery_date:%m/%d/%Y}" if rr.delivery_date else "",
+                f"{rr.req_qty:g}" if isinstance(rr.req_qty, (int, float)) else (rr.req_qty or ""),
+                "", f"REMOVE row {rr.row} (not shipped; replaced by the 9J)"))
+        n, gone = self.plan.new_count, self.plan.removed_count
         dup = sum(1 for pl in self.plan.lines if pl.status == DUPLICATE)
-        self.status_var.set(f"{n} new line(s) to add, {dup} already on the sheet.")
-        self.update_btn.configure(state="normal" if n else "disabled")
+        self.status_var.set(f"{n} line(s) to add, {gone} unshipped row(s) to remove, "
+                            f"{dup} already shipped on the sheet.")
+        self.update_btn.configure(state="normal" if self.plan.has_changes else "disabled")
 
     def update_sheet(self):
-        if not self.plan or not self.plan.new_count:
+        if not self.plan or not self.plan.has_changes:
             return
         tabs = ", ".join(self.plan.writes)
-        if not messagebox.askyesno(TITLE, f"Add {self.plan.new_count} line(s) to: {tabs}?"):
+        if not messagebox.askyesno(
+                TITLE, f"Remove {self.plan.removed_count} unshipped row(s) and add "
+                       f"{self.plan.new_count} line(s) on: {tabs}?"):
             return
         plan, book = self.plan, self.book
 
@@ -256,7 +266,8 @@ class App(tk.Tk):
             if err:
                 messagebox.showerror(TITLE, f"The sheet was NOT updated:\n\n{err}")
                 return
-            messagebox.showinfo(TITLE, f"Done! Added {result} line(s) to the sheet.")
+            messagebox.showinfo(TITLE, f"Done! Removed {plan.removed_count} unshipped row(s) and "
+                                       f"added {result} line(s).")
             self.plan = None
             self.update_btn.configure(state="disabled")
             self._load_sheet_and_plan()  # refresh so the preview shows them as already on sheet
