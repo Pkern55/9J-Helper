@@ -8,6 +8,9 @@ Reads a Hendrickson **9J Supplier Schedule** PDF and adds its lines to the order
 1. Download **9J-Helper.exe** from the [Releases page](../../releases/latest) (put it on your Desktop).
 2. Double-click it. The first time, Windows may say *"Windows protected your PC"*:
    click **More info → Run anyway**.
+   The window title shows the version (e.g. "9J Helper 0.1.1"). To update, download the
+   newest 9J-Helper.exe from the Releases page and replace the old one; your settings and
+   Google sign-in are kept.
 3. Click **Browse…** and pick the 9J PDF from your email/downloads.
 4. The first time only:
    - Paste the link to your Google Sheet (open the sheet in your browser, copy the address bar).
@@ -37,6 +40,8 @@ Formatting on new rows:
 - The **Part Number text color** matches that part's most recent row on the tab (e.g. 010545-2
   stays blue). Brand-new parts keep the default color. Background and bold aren't changed.
 - Columns **A–J get thin black borders** on all sides, like the rest of the order rows.
+- The tab's **sort/filter range grows to include the new rows**, so they sort and filter with
+  the rest of the table. (Your existing filter settings are kept.)
 
 Tabs are matched by part number only (the tab that already has that part). The PO number is
 ignored. For a part that isn't on any tab yet, the app asks which tab to use and remembers it.
