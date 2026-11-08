@@ -251,6 +251,7 @@ def test_sample_against_export():
     from nine_j_helper.nine_j import parse_pdf
     plan = planner.build_plan(parse_pdf(SAMPLE_PDF), xlsx_book.load_order_tabs(SAMPLE_XLSX))
     assert {pl.tab for pl in plan.lines} == {"Machined Only"}
+    assert [g.part for g in planner.display_groups(plan)] == ["010545-1", "010545-2", "009956"]  # 9J order
     tw0 = plan.writes["Machined Only"]
     colors = {tw0.rows[r][0]: tw0.text_colors[r] for r in tw0.rows}
     assert colors == {"010545-1": None, "010545-2": "FF0000FF", "009956": "FFFF00FF"}
@@ -568,11 +569,23 @@ def test_display_groups_one_group_per_part_in_date_order():
     assert summary[0].rows[1].status.startswith("ADDED at row ")
 
 
+def test_display_groups_follow_the_order_parts_appear_on_the_9j():
+    marker = "Last Receipt Date Receipt Qty Hendrickson Item # Item Description" + chr(10)
+    head, first, second = SAMPLE_TEXT.split(marker)
+    swapped = parse_text(head + marker + second + marker + first)  # NEWPART-9 block now comes first
+    plan = planner.build_plan(swapped, planner.load_tabs(fake_rows()), {"NEWPART-9": "S-Beams"})
+    assert [g.part for g in planner.display_groups(plan)] == ["NEWPART-9", "010545-1"]
+    # text sort would give the same order here, so also check a part that sorts first but comes last
+    plan = planner.build_plan(parse_text(SAMPLE_TEXT.replace("NEWPART-9", "000001")),
+                              planner.load_tabs(fake_rows()), {"000001": "S-Beams"})
+    assert [g.part for g in planner.display_groups(plan)] == ["010545-1", "000001"]
+
+
 def test_display_groups_shows_skipped_shipped_lines_and_sorts_parts():
     text = SAMPLE_TEXT.replace("Daily 10/28/26", "Daily 10/14/26")  # matches the shipped row 3
     plan = planner.build_plan(parse_text(text), planner.load_tabs(fake_rows()), {"NEWPART-9": "S-Beams"})
     groups = planner.display_groups(plan)
-    assert [g.part for g in groups] == ["010545-1", "NEWPART-9"]
+    assert [g.part for g in groups] == ["010545-1", "NEWPART-9"]  # 9J order
     assert planner.SKIPPED in [r.kind for r in groups[0].rows]
 
 

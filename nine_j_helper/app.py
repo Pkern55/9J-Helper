@@ -65,7 +65,7 @@ class App(tk.Tk):
                                     state="readonly", width=28)
         self.sort_cb.pack(side="left", padx=6)
         self.sort_cb.bind("<<ComboboxSelected>>", lambda _e: self._on_sort())
-        ttk.Label(order, text="(the list below is always grouped by part)",
+        ttk.Label(order, text="(the list below follows the 9J, one box per part)",
                   foreground="#777777").pack(side="left", padx=6)
 
         self.table = GroupTable(self)

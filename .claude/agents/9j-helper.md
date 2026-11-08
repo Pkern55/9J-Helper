@@ -106,7 +106,7 @@ For each 9J line:
   as `m/d/yyyy` text and prefixes numeric-looking text with `'` (keeps `009956`'s zeros).
 - `xlsx_book.py`: same reads/writes against an .xlsx (dry runs/tests).
 - `group_table.py`: `GroupTable` Canvas widget (thick box per part group; summary fills green added /
-  red removed), fed by `planner.display_groups(plan, summary)`. The sort dropdown re-plans on the
+  red removed; boxes ordered by each part's first appearance on the 9J), fed by `planner.display_groups(plan, summary)`. The sort dropdown re-plans on the
   already-loaded sheet. No Firm/Plan column in the GUI (the parser still has it).
 - `app.py`: Tkinter UI, background thread for Google calls. `config.py`: settings in
   `%APPDATA%\9J Helper\` (`config.json` = sheet ID/title, part→tab choices, last folder;

@@ -17,9 +17,9 @@ Reads a Hendrickson **9J Supplier Schedule** PDF and updates the orders Google S
    - A browser window opens to sign in to Google. You'll see *"Google hasn't verified this app"*:
      click **Advanced → Go to 9J Helper (unsafe)** and then **Continue**. (It's our own app;
      it only gets access to Google Sheets.)
-5. Look over the list. It is grouped by part, with **one thick box around each part's rows**
-   (all the 010545-1 lines together, and so on) and each box in date order, so you can check the
-   app's work at a glance:
+5. Look over the list. It follows the order of the 9J, with **one thick box around each part's
+   rows** (all the 010545-1 lines together, and so on; boxes in the order the parts appear on the
+   9J, rows in date order), so you can check the app's work at a glance:
    - **green "new → row 35"**: will be added at that row
    - **red "REMOVE row 33"**: an old row that hasn't shipped; it is deleted and replaced by the 9J
      (it sits just above the line that replaces it)
@@ -28,7 +28,7 @@ Reads a Hendrickson **9J Supplier Schedule** PDF and updates the orders Google S
 
    Use **Add rows to the sheet in this order** to pick how the new rows are written to the sheet:
    *Delivery date, then part* (default), *Part number, then date*, or *Order on the 9J*. The list
-   stays grouped by part either way; the row numbers in it update to match. Your choice is remembered.
+   always follows the 9J and stays grouped by part either way; the row numbers in it update to match. Your choice is remembered.
 6. Click **Update Sheet**, then **Yes**.
 7. The list then turns into a summary of what was done: **green rows were added, red rows were
    removed**. It stays until you pick another 9J with **Browse…**.

@@ -414,18 +414,21 @@ class Group:
 
 
 def display_groups(plan: Plan, summary: bool = False) -> List[Group]:
-    """Everything the window lists, grouped by part number (one boxed group per part, in part
-    order) and by date inside each group. A removed row sorts just above the line that replaces
-    it. Lines that still need a tab form a last group. `summary` words the status as done."""
+    """Everything the window lists: one boxed group per part, the groups in the order the parts
+    first appear on the 9J, and by date inside each group. A removed row sorts just above the
+    line that replaces it. Lines that still need a tab form a last group. `summary` words the
+    status as done."""
     by_part: Dict[str, List[DisplayRow]] = {}
+    first_seq: Dict[str, int] = {}  # part -> position of its first line on the 9J
     unrouted: List[DisplayRow] = []
     for rr in plan.removed:
         txt = f"REMOVED (was row {rr.row})" if summary else f"REMOVE row {rr.row} (not shipped; replaced by the 9J)"
-        by_part.setdefault(part_text(rr.part), []).append(
+        by_part.setdefault(part_key(rr.part), []).append(
             DisplayRow(REMOVED, rr.tab, rr.part, rr.delivery_date, rr.req_qty, txt))
     for pl in plan.lines:
         ln = pl.line
-        part = part_text(ln.sheet_part)
+        part = part_key(ln.sheet_part)
+        first_seq[part] = min(first_seq.get(part, pl.seq), pl.seq)
         if pl.status == NEW:
             txt = f"ADDED at row {pl.row}" if summary else f"new → row {pl.row}"
             by_part.setdefault(part, []).append(
@@ -441,7 +444,9 @@ def display_groups(plan: Plan, summary: bool = False) -> List[Group]:
     def key(r: DisplayRow):
         return (r.delivery_date or date.min, _KIND_ORDER[r.kind])
 
-    groups = [Group(part, sorted(rows, key=key)) for part, rows in sorted(by_part.items())]
+    # A removed row always belongs to a part that is on the 9J, so every group has a position.
+    ordered = sorted(by_part.items(), key=lambda kv: (first_seq.get(kv[0], 10**9), kv[0]))
+    groups = [Group(rows[0].part and part_text(rows[0].part), sorted(rows, key=key)) for _, rows in ordered]
     if unrouted:
         groups.append(Group("", sorted(unrouted, key=lambda r: (part_text(r.part), key(r)))))
     return groups
