@@ -62,6 +62,7 @@ class Config:
         self.spreadsheet_title: str = data.get("spreadsheet_title", "")
         self.part_tabs: Dict[str, str] = dict(data.get("part_tabs", {}))
         self.last_folder: str = data.get("last_folder", "")
+        self.sort_order: str = data.get("sort_order", "date")  # a key of planner.SORTS
 
     @classmethod
     def load(cls) -> "Config":
@@ -78,4 +79,5 @@ class Config:
                 "spreadsheet_title": self.spreadsheet_title,
                 "part_tabs": self.part_tabs,
                 "last_folder": self.last_folder,
+                "sort_order": self.sort_order,
             }, f, indent=2)

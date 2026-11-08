@@ -8,6 +8,7 @@ from copy import copy
 from typing import Dict, List
 
 import openpyxl
+from openpyxl.formula.translate import Translator
 from openpyxl.styles import Border, Side
 
 from .planner import Plan, load_tabs, order_tab_names
@@ -43,6 +44,18 @@ def load_order_tabs(path: str):
     return load_tabs(rows, read_part_colors(path, order_tab_names(rows)))
 
 
+def _delete_row(ws, r: int) -> None:
+    """Delete sheet row r. openpyxl moves the cells below up but leaves their formulas pointing
+    at the old rows, so those are translated here. (Merged cells, filter range and conditional
+    formats are not adjusted: this backend is only for dry runs.)"""
+    ws.delete_rows(r)
+    for row in ws.iter_rows(min_row=r, max_row=ws.max_row):
+        for cell in row:
+            if isinstance(cell.value, str) and cell.value.startswith("="):
+                cell.value = Translator(cell.value, origin=f"{cell.column_letter}{cell.row + 1}"
+                                        ).translate_formula(cell.coordinate)
+
+
 def apply(plan: Plan, src: str, dst: str) -> None:
     if os.path.abspath(src) == os.path.abspath(dst):
         raise ValueError("Refusing to overwrite the source workbook; choose a different output path.")
@@ -50,6 +63,8 @@ def apply(plan: Plan, src: str, dst: str) -> None:
     border = Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
     for tw in plan.writes.values():
         ws = wb[tw.tab]
+        for r in sorted(tw.delete_rows, reverse=True):  # bottom-most first
+            _delete_row(ws, r)
         if tw.insert_count:
             ws.insert_rows(tw.insert_at, tw.insert_count)
         for r, cells in tw.rows.items():

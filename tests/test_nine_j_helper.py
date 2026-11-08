@@ -102,24 +102,104 @@ def test_layout_detection_skips_non_order_tabs():
     assert mo.layout.header_row == 2
     assert (mo.layout.part, mo.layout.location, mo.layout.date, mo.layout.req) == (0, 1, 2, 3)
     assert (mo.layout.ship_to, mo.layout.shipped, mo.layout.net, mo.layout.part_copy) == (4, 5, 6, 10)
+    assert (mo.layout.actual_date, mo.layout.ps) == (7, 8)
     assert mo.x_rows == [5, 6]
+    assert mo.unshipped_rows == [4]  # row 3 shipped 28; row 4 has no F/H/I
+    assert mo.existing == {("10545-1", _d(2026, 10, 14))}  # shipped rows only
     assert tabs["S-Beams"].layout.part_copy is None
 
 
-def test_plan_uses_item_number_net_qty_and_only_three_columns():
+def test_plan_replaces_unshipped_row_and_writes_formulas():
     doc = parse_text(SAMPLE_TEXT)
     plan = planner.build_plan(doc, planner.load_tabs(fake_rows()))
     by = {(pl.line.sheet_part, pl.line.delivery_date): pl for pl in plan.lines}
-    assert by[("010545-1", date(2026, 10, 28))].status == planner.DUPLICATE
+    # Row 4 (10/28) is unshipped, so it is replaced rather than "already on sheet".
+    assert by[("010545-1", date(2026, 10, 28))].status == planner.NEW
+    assert [(r.tab, r.row, r.part) for r in plan.removed] == [("Machined Only", 4, "010545-1")]
     # Brand-new part: PO is ignored, so the user must choose a tab
     assert [pl.line.sheet_part for pl in plan.unrouted] == ["NEWPART-9"]
     assert set(plan.unrouted[0].candidates) == {"Machined Only", "S-Beams"}
-    assert by[("010545-1", date(2026, 11, 4))].row == 5
-    assert by[("010545-1", date(2027, 1, 4))].row == 6
+    # Row 4 is deleted first, so the old x rows 5-6 become 4-5 and the third line overflows to 6.
+    assert [by[("010545-1", d)].row for d in (date(2026, 10, 28), date(2026, 11, 4), date(2027, 1, 4))] == [4, 5, 6]
     tw = plan.writes["Machined Only"]
-    assert tw.insert_count == 0
-    assert tw.rows[5] == {0: "010545-1", 2: date(2026, 11, 4), 3: 28.0}
-    assert tw.rows[6] == {0: "010545-1", 2: date(2027, 1, 4), 3: 84.0}  # Net Req Qty, not 1,084
+    assert tw.delete_rows == [4] and tw.expected_deleted == {4: "10545-1"}
+    assert tw.expected_x_rows == [5, 6] and tw.last_data_row == 3
+    assert (tw.insert_at, tw.insert_count) == (6, 1)
+    assert tw.rows[4] == {0: "010545-1", 2: date(2026, 10, 28), 3: 28.0,
+                          4: "=WORKDAY(C4,-2)", 6: "=D4-F4", 10: "010545-1"}
+    assert tw.rows[6][3] == 84.0  # Net Req Qty, not 1,084
+    assert tw.rows[6][4] == "=WORKDAY(C6,-2)"  # formulas use the row's own number
+    assert tw.rows[6][6] == "=D6-F6"
+
+
+def test_formulas_skip_columns_a_tab_does_not_have():
+    tabs = planner.load_tabs(fake_rows())
+    sb = tabs["S-Beams"].layout  # no part-number copy column
+    assert planner.formula_cells(sb, 9, "020823") == {4: "=WORKDAY(C9,-2)", 6: "=D9-F9"}
+    assert planner.formula_cells(tabs["Machined Only"].layout, 9, "X1")[10] == "X1"
+
+
+def test_unshipped_needs_all_of_shipped_ship_date_and_ps_blank():
+    lay = planner.load_tabs(fake_rows())["Machined Only"].layout
+    row = lambda **kw: ["P", "HAUX", 46000, 28, "f", kw.get("f"), "g", kw.get("h"), kw.get("i")]
+    assert planner.is_unshipped(row(), lay)
+    assert planner.is_unshipped(row(f="  ", h="", i=None), lay)
+    assert not planner.is_unshipped(row(f=28), lay)
+    assert not planner.is_unshipped(row(f="=38+66+58"), lay)  # a formula counts as filled
+    assert not planner.is_unshipped(row(h=46010), lay)
+    assert not planner.is_unshipped(row(i=34465), lay)
+    assert not planner.is_unshipped(row(f=0), lay)  # 0 shipped is still filled in
+    no_shipped = planner.TabLayout(name="t", header_row=1, part=0, date=2)
+    assert not planner.is_unshipped(row(), no_shipped)  # can't tell, so never delete
+
+
+def _rows_for_replace():
+    return {"Machined Only": [
+        ["Part Number", "Location", "Deliver Date", "Req Qty", "Ship to Customer", "Shipped Qty",
+         "Balance Due", "Actual Ship Date", "P/S", "Comments", "part number"],
+        ["010545-1", "HAUX", _d(2026, 9, 9), 28, 1, None, 28, None, None, None, "010545-1"],  # dropped date
+        ["010545-1", "HAUX", _d(2026, 10, 14), 28, 1, 28, 0, _d(2026, 10, 12), 1, None, "010545-1"],  # shipped
+        ["010545-2", "HAUX", _d(2026, 10, 14), 28, 1, None, 28, None, None, None, "010545-2"],  # not on 9J
+        ["010545-1", "HAUX", _d(2026, 10, 28), 28, 1, None, 28, None, None, None, "010545-1"],
+        ["x"], ["x"],
+    ]}
+
+
+def test_only_parts_on_the_9j_lose_unshipped_rows_and_dropped_dates_go_too():
+    tabs = planner.load_tabs(_rows_for_replace())
+    plan = planner.build_plan(parse_text(SAMPLE_TEXT), tabs)  # 9J has 010545-1 (+ an unrouted part)
+    tw = plan.writes["Machined Only"]
+    # row 2 (9/9, date no longer on the 9J) and row 5 (10/28) go; the other part's unshipped row stays
+    assert tw.delete_rows == [2, 5]
+    assert [r.row for r in plan.removed] == [2, 5]
+    # Rows 3, 4 stay and become 2, 3; x rows 6-7 become 4-5; last order is row 3.
+    assert tw.last_data_row == 3
+    assert min(tw.rows) == 4
+
+
+def test_9j_line_matching_a_shipped_row_is_skipped():
+    text = SAMPLE_TEXT.replace("Daily 10/28/26", "Daily 10/14/26")
+    plan = planner.build_plan(parse_text(text), planner.load_tabs(_rows_for_replace()))
+    st = {(pl.line.delivery_date, pl.status) for pl in plan.lines if pl.line.sheet_part == "010545-1"}
+    assert (date(2026, 10, 14), planner.DUPLICATE) in st
+    # the unshipped 10/14 row of the OTHER part is irrelevant; shipped 010545-1 row 3 is untouched
+    assert 3 not in plan.writes["Machined Only"].delete_rows
+
+
+def test_deleting_a_middle_row_shifts_the_slots_up():
+    rows = {"Machined Only": [
+        ["Part Number", "Location", "Deliver Date", "Req Qty", "Ship to Customer", "Shipped Qty",
+         "Balance Due", "Actual Ship Date", "P/S", "Comments", "part number"],
+        ["010545-1", "HAUX", _d(2026, 9, 9), 28, 1, None, 28, None, None, None, "010545-1"],
+        ["010545-2", "HAUX", _d(2026, 9, 9), 28, 1, 28, 0, _d(2026, 9, 8), 1, None, "010545-2"],
+        ["x"], ["x"], ["x"], ["x"],
+    ]}
+    text = SAMPLE_TEXT.replace("NEWPART-9", "010545-2")
+    tw = planner.build_plan(parse_text(text), planner.load_tabs(rows)).writes["Machined Only"]
+    assert tw.delete_rows == [2]
+    assert tw.expected_x_rows == [4, 5, 6, 7]
+    assert sorted(tw.rows) == [3, 4, 5, 6] and tw.insert_count == 0  # x rows move up one
+    assert tw.last_data_row == 2  # the shipped 010545-2 row, now row 2
 
 
 def test_override_routes_new_part_and_overflow_inserts_rows():
@@ -131,8 +211,8 @@ def test_override_routes_new_part_and_overflow_inserts_rows():
     assert newp.line.part == "NP9-REF"  # the line's own Part column is ignored
     assert newp.tab == "Machined Only" and newp.row == 6
     tw = plan.writes["Machined Only"]
-    assert tw.rows[6] == {0: "NEWPART-9", 2: date(2026, 12, 1), 3: 10.0}
-    assert (tw.insert_at, tw.insert_count) == (7, 1)  # 3 new lines, only 2 x rows
+    assert {c: tw.rows[6][c] for c in (0, 2, 3)} == {0: "NEWPART-9", 2: date(2026, 12, 1), 3: 10.0}
+    assert (tw.insert_at, tw.insert_count) == (6, 2)  # 4 lines; row 4 deleted, x rows now 4-5
     assert tw.expected_x_rows == [5, 6]
     plan = planner.build_plan(doc, tabs, {"NEWPART-9": "S-Beams"})
     newp = [pl for pl in plan.lines if pl.line.sheet_part == "NEWPART-9"][0]
@@ -145,14 +225,14 @@ def test_text_color_comes_from_parts_latest_row():
     tabs = planner.load_tabs(fake_rows(), {"Machined Only": {3: "RED", 4: "BLUE"}})
     plan = planner.build_plan(doc, tabs, {"NEWPART-9": "Machined Only"})
     tw = plan.writes["Machined Only"]
-    assert tw.text_colors == {5: "BLUE", 7: "BLUE"}  # row 6 = brand-new part: left alone
+    assert tw.text_colors == {4: "BLUE", 5: "BLUE", 7: "BLUE"}  # row 6 = brand-new part: left alone
     assert tw.part_col == 0 and tw.border_cols == 10
 
 
 def test_text_color_default_when_latest_row_is_uncolored():
     tabs = planner.load_tabs(fake_rows(), {"Machined Only": {3: "RED"}})
     tw = planner.build_plan(parse_text(SAMPLE_TEXT), tabs).writes["Machined Only"]
-    assert tw.text_colors == {5: None, 6: None}  # explicit default, overriding any x-row color
+    assert tw.text_colors == {4: None, 5: None, 6: None}  # explicit default, overriding any x-row color
 
 
 def test_row_blocks_split_non_consecutive_rows():
@@ -171,18 +251,24 @@ def test_sample_against_export():
     from nine_j_helper.nine_j import parse_pdf
     plan = planner.build_plan(parse_pdf(SAMPLE_PDF), xlsx_book.load_order_tabs(SAMPLE_XLSX))
     assert {pl.tab for pl in plan.lines} == {"Machined Only"}
+    assert [g.part for g in planner.display_groups(plan)] == ["010545-1", "010545-2", "009956"]  # 9J order
     tw0 = plan.writes["Machined Only"]
     colors = {tw0.rows[r][0]: tw0.text_colors[r] for r in tw0.rows}
     assert colors == {"010545-1": None, "010545-2": "FF0000FF", "009956": "FFFF00FF"}
-    dups = [(pl.line.sheet_part, pl.line.delivery_date) for pl in plan.lines if pl.status == planner.DUPLICATE]
-    assert sorted(dups) == [("010545-1", date(2026, 10, 28)), ("010545-2", date(2026, 10, 28))]
-    assert sorted(pl.row for pl in plan.lines if pl.status == planner.NEW) == list(range(35, 45))
+    # Machined Only rows 33/34 (10/28, unshipped) are replaced by the 9J's lines, so nothing is a dup.
+    assert not [pl for pl in plan.lines if pl.status == planner.DUPLICATE]
+    assert [(r.row, r.part) for r in plan.removed] == [(33, "010545-1"), (34, "010545-2")]
+    assert sorted(pl.row for pl in plan.lines if pl.status == planner.NEW) == list(range(33, 45))
     tw = plan.writes["Machined Only"]
-    # Machined Only no longer has placeholder "x" rows (the filter range now grows with the data),
-    # so all 10 new lines are inserted below the last data row (row 34) and join the filter.
+    # Machined Only has no placeholder "x" rows (the filter range grows with the data), so after
+    # rows 33-34 are removed all 12 lines are inserted below the last order (row 32).
     assert not xlsx_book.load_order_tabs(SAMPLE_XLSX)["Machined Only"].x_rows
-    assert (tw.insert_at, tw.insert_count) == (35, 10)
-    jan =[c for c in tw.rows.values() if c[0] == "009956" and c[2] == date(2027, 1, 4)][0]
+    assert tw.delete_rows == [33, 34] and tw.last_data_row == 32
+    assert (tw.insert_at, tw.insert_count) == (33, 12)
+    first = tw.rows[33]
+    assert (first[0], first[4], first[6], first[10]) == (
+        "010545-1", "=WORKDAY(C33,-2)", "=D33-F33", "010545-1")
+    jan = [c for c in tw.rows.values() if c[0] == "009956" and c[2] == date(2027, 1, 4)][0]
     assert jan[3] == 184.0  # Net Req Qty (the 9J's Req Qty is 193)
 
 
@@ -252,30 +338,35 @@ def test_google_apply_builds_requests():
     book = FakeBook(rows)
     tabs = planner.load_tabs(rows, {"Machined Only": {4: BLUE}})
     plan = planner.build_plan(parse_text(SAMPLE_TEXT), tabs, {"NEWPART-9": "Machined Only"})
-    # The tab's filter covers rows 2-6 (0-based end 6): the inserted row 7 sits right below it.
+    # The tab's filter covers rows 2-6 (0-based end 6). Row 4 is deleted (-> end 5), then rows
+    # 6-7 are inserted just below it, so they are outside the filter until it is extended.
     book.meta = {"sheets": [{"properties": {"sheetId": 1}, "basicFilter": {
         "range": {"sheetId": 1, "startRowIndex": 1, "endRowIndex": 6, "endColumnIndex": 10},
         "criteria": {"0": {}},
         "filterSpecs": [{"columnIndex": 0, "filterCriteria": {}}]}}]}
     n = google_book.apply(book, plan)
-    assert n == 3
-    # Last request: after the rows are written, the filter grows to include the inserted row.
+    assert n == 4
+    # Last request: after the rows are written, the filter grows to include the inserted rows.
     assert book.batches[-1]["requests"] == [
         {"setBasicFilter": {"filter": {
             "range": {"sheetId": 1, "startRowIndex": 1, "endRowIndex": 7, "endColumnIndex": 10},
             "filterSpecs": [{"columnIndex": 0, "filterCriteria": {}}]}}}]
     assert book.batches[0]["requests"] == [
-        {"insertDimension": {
-            "range": {"sheetId": 1, "dimension": "ROWS", "startIndex": 6, "endIndex": 7},
-            "inheritFromBefore": True}},
-        _color_req(5, BLUE),  # 010545-1 keeps its blue; row 6 (new part) untouched
+        {"deleteDimension": {  # the stale unshipped row 4 goes first
+            "range": {"sheetId": 1, "dimension": "ROWS", "startIndex": 3, "endIndex": 4}}},
+        {"insertDimension": {  # then 2 rows after the (shifted) x rows 4-5
+            "range": {"sheetId": 1, "dimension": "ROWS", "startIndex": 5, "endIndex": 7},
+            "inheritFromBefore": False}},
+        _color_req(4, BLUE),  # 010545-1 keeps its blue; row 6 (new part) untouched
+        _color_req(5, BLUE),
         _color_req(7, BLUE),
-        _border_req(5, 7),    # x rows 5-6 + inserted row 7 form one block
+        _border_req(4, 7),    # x rows 4-5 + inserted rows 6-7 form one block
     ]
     assert book.values["valueInputOption"] == "USER_ENTERED"
     first = book.values["data"][0]
-    assert first["range"] == "'Machined Only'!A5:D5"
-    assert first["values"][0] == ["010545-1", None, "11/4/2026", 28.0]  # B (Location) untouched
+    assert first["range"] == "'Machined Only'!A4:K4"
+    assert first["values"][0] == ["010545-1", None, "10/28/2026", 28.0, "=WORKDAY(C4,-2)", None,
+                                  "=D4-F4", None, None, None, "010545-1"]  # B (Location) untouched
 
 
 def test_filter_extension_grows_to_last_row():
@@ -293,13 +384,58 @@ def test_filter_extension_grows_to_last_row():
     assert google_book._filter_extension({}, None, 0, last_row=5) is None
 
 
-def test_google_apply_without_insert_sets_default_color_and_borders():
+def test_google_apply_sets_default_color_and_borders():
     rows = fake_rows()
     book = FakeBook(rows)
     plan = planner.build_plan(parse_text(SAMPLE_TEXT), planner.load_tabs(rows))
-    assert google_book.apply(book, plan) == 2
+    assert google_book.apply(book, plan) == 3
     black = {"rgbColor": {}}
-    assert book.batch["requests"] == [_color_req(5, black), _color_req(6, black), _border_req(5, 6)]
+    assert book.batch["requests"][2:] == [
+        _color_req(4, black), _color_req(5, black), _color_req(6, black), _border_req(4, 6)]
+
+
+def test_google_apply_deletes_bottom_up_without_inserting_when_x_rows_suffice():
+    rows = {"Machined Only": _rows_for_replace()["Machined Only"]}
+    rows["Machined Only"][6:6] = [["x"], ["x"]]  # plenty of placeholder rows
+    book = FakeBook(rows)
+    plan = planner.build_plan(parse_text(SAMPLE_TEXT), planner.load_tabs(rows))
+    assert google_book.apply(book, plan) == 3
+    dels = [r["deleteDimension"]["range"] for r in book.batches[0]["requests"] if "deleteDimension" in r]
+    assert [(d["startIndex"], d["endIndex"]) for d in dels] == [(4, 5), (1, 2)]  # row 5 then row 2
+    assert not any("insertDimension" in r for r in book.batches[0]["requests"])
+
+
+def test_google_apply_with_only_deletes_writes_no_values():
+    hdr = fake_rows()["Machined Only"][1]
+    shipped = lambda d: ["010545-1", "HAUX", _d(*d), 28, 1, 28, 0, _d(2026, 1, 1), 1, None, "010545-1"]
+    rows = {"Machined Only": [
+        hdr,
+        ["010545-1", "HAUX", _d(2026, 9, 9), 28, 1, None, 28, None, None, None, "010545-1"],  # stale
+        shipped((2026, 10, 28)), shipped((2026, 11, 4)), shipped((2027, 1, 4)),
+    ]}
+    book = FakeBook(rows)
+    plan = planner.build_plan(parse_text(SAMPLE_TEXT), planner.load_tabs(rows))
+    assert plan.new_count == 0 and plan.removed_count == 1 and plan.has_changes
+    assert google_book.apply(book, plan) == 0
+    assert book.batches[0]["requests"][0]["deleteDimension"]["range"]["startIndex"] == 1
+    assert book.values is None  # nothing to write
+
+
+def test_google_apply_refuses_if_a_row_to_delete_was_shipped_meanwhile():
+    rows = fake_rows()
+    plan = planner.build_plan(parse_text(SAMPLE_TEXT), planner.load_tabs(rows))
+    rows["Machined Only"][3][5] = 28  # someone just filled in Shipped Qty on row 4
+    with pytest.raises(google_book.SheetChangedError):
+        google_book.apply(FakeBook(rows), plan)
+
+
+def test_filter_extension_accounts_for_deleted_rows():
+    flt = {"range": {"startRowIndex": 1, "endRowIndex": 34, "endColumnIndex": 11}}
+    # rows 33-34 deleted inside the filter: it is 32 long now, so 44 needs an extension
+    ext = google_book._filter_extension(flt, 33, 12, 44, deleted_rows=[33, 34])
+    assert ext["setBasicFilter"]["filter"]["range"]["endRowIndex"] == 44
+    # inserting inside the shrunken filter grows it by itself: 32 + 12 = 44, nothing to do
+    assert google_book._filter_extension(flt, 20, 12, 44, deleted_rows=[33, 34]) is None
 
 
 def test_read_part_colors_parses_grid_data():
@@ -339,3 +475,177 @@ def test_spreadsheet_id_from_url():
     url = "https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789/edit#gid=0"
     assert spreadsheet_id_from(url) == "1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"
     assert spreadsheet_id_from("not a link") is None
+
+
+# ------------------------------------------------------------------ xlsx backend
+
+def test_xlsx_apply_deletes_rows_and_translates_formulas_below(tmp_path):
+    import openpyxl
+    from nine_j_helper import xlsx_book
+    src, dst = str(tmp_path / "src.xlsx"), str(tmp_path / "out.xlsx")
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Machined Only"
+    for r in fake_rows()["Machined Only"][:2]:
+        ws.append(r)
+    ws.append(["010545-1", "HAUX", date(2026, 9, 9), 28, "=WORKDAY(C3,-2)", None, "=D3-F3", None, None, None, "010545-1"])
+    ws.append(["010545-2", "HAUX", date(2026, 9, 9), 28, "=WORKDAY(C4,-2)", 28, "=D4-F4", date(2026, 9, 8), 1, None, "010545-2"])
+    ws.append(["x"])
+    wb.save(src)
+    plan = planner.build_plan(parse_text(SAMPLE_TEXT), xlsx_book.load_order_tabs(src))
+    assert plan.writes["Machined Only"].delete_rows == [3]
+    xlsx_book.apply(plan, src, dst)
+    out = openpyxl.load_workbook(dst)["Machined Only"]
+    assert [out.cell(3, c).value for c in (1, 5, 7)] == ["010545-2", "=WORKDAY(C3,-2)", "=D3-F3"]  # moved up
+    assert out.cell(4, 1).value == "010545-1" and out.cell(4, 5).value == "=WORKDAY(C4,-2)"  # new, in x row
+    assert out.cell(4, 11).value == "010545-1" and out.cell(4, 4).value == 28.0
+    assert openpyxl.load_workbook(src)["Machined Only"].cell(3, 1).value == "010545-1"  # source untouched
+
+
+# ------------------------------------------------------------------ sort order
+
+def _written(plan, tab="Machined Only"):
+    """[(row, part, date)] of the new rows, in sheet-row order."""
+    tw = plan.writes[tab]
+    return [(r, tw.rows[r][0], tw.rows[r][2]) for r in sorted(tw.rows)]
+
+
+def test_sort_orders_decide_which_row_each_line_gets():
+    doc = parse_text(SAMPLE_TEXT)
+    tabs = planner.load_tabs(fake_rows())
+    ov = {"NEWPART-9": "Machined Only"}
+    by_date = _written(planner.build_plan(doc, tabs, ov, sort="date"))
+    assert [d for _, _, d in by_date] == sorted(d for _, _, d in by_date)
+    by_part = _written(planner.build_plan(doc, tabs, ov, sort="part"))
+    assert [p for _, p, _ in by_part] == ["010545-1"] * 3 + ["NEWPART-9"]
+    in_9j = _written(planner.build_plan(doc, tabs, ov, sort="9j"))
+    assert [(p, d) for _, p, d in in_9j] == [
+        ("010545-1", date(2026, 10, 28)), ("010545-1", date(2026, 11, 4)),
+        ("010545-1", date(2027, 1, 4)), ("NEWPART-9", date(2026, 12, 1))]
+    # unknown sort keys fall back to date order, and formulas always follow the row number
+    plan = planner.build_plan(doc, tabs, ov, sort="bogus")
+    assert _written(plan) == by_date
+    for r, cells in plan.writes["Machined Only"].rows.items():
+        assert cells[4] == f"=WORKDAY(C{r},-2)"
+
+
+def test_sort_by_part_vs_date_differ_with_interleaved_parts():
+    text = SAMPLE_TEXT.replace("Weekly 12/01/26 NP9-REF ADDED 11/1 F", "Weekly 11/01/26 NP9-REF ADDED 11/1 F")
+    doc = parse_text(text)
+    tabs = planner.load_tabs(fake_rows())
+    ov = {"NEWPART-9": "Machined Only"}
+    date_order = [p for _, p, _ in _written(planner.build_plan(doc, tabs, ov, sort="date"))]
+    part_order = [p for _, p, _ in _written(planner.build_plan(doc, tabs, ov, sort="part"))]
+    assert date_order == ["010545-1", "NEWPART-9", "010545-1", "010545-1"]  # NEWPART-9 dated 11/1
+    assert part_order == ["010545-1", "010545-1", "010545-1", "NEWPART-9"]
+
+
+def test_config_remembers_sort_order(tmp_path, monkeypatch):
+    from nine_j_helper import config
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    c = config.Config.load()
+    assert c.sort_order == "date"
+    c.sort_order = "part"
+    c.save()
+    assert config.Config.load().sort_order == "part"
+
+
+# ------------------------------------------------------------------ what the window shows
+
+def test_display_groups_one_group_per_part_in_date_order():
+    doc = parse_text(SAMPLE_TEXT)
+    plan = planner.build_plan(doc, planner.load_tabs(fake_rows()))
+    groups = planner.display_groups(plan)
+    assert [g.part for g in groups] == ["010545-1", ""]  # then lines that still need a tab
+    g = groups[0]
+    # the removed unshipped 10/28 row sits right above the line that replaces it
+    assert [(r.kind, r.delivery_date) for r in g.rows][:2] == [
+        (planner.REMOVED, date(2026, 10, 28)), (planner.ADDED, date(2026, 10, 28))]
+    assert [r.delivery_date for r in g.rows] == sorted(r.delivery_date for r in g.rows)
+    assert g.rows[0].status == "REMOVE row 4 (not shipped; replaced by the 9J)"
+    assert groups[1].rows[0].kind == planner.NEEDS_TAB and groups[1].rows[0].part == "NEWPART-9"
+    summary = planner.display_groups(plan, summary=True)
+    assert summary[0].rows[0].status == "REMOVED (was row 4)"
+    assert summary[0].rows[1].status.startswith("ADDED at row ")
+
+
+def test_display_groups_follow_the_order_parts_appear_on_the_9j():
+    marker = "Last Receipt Date Receipt Qty Hendrickson Item # Item Description" + chr(10)
+    head, first, second = SAMPLE_TEXT.split(marker)
+    swapped = parse_text(head + marker + second + marker + first)  # NEWPART-9 block now comes first
+    plan = planner.build_plan(swapped, planner.load_tabs(fake_rows()), {"NEWPART-9": "S-Beams"})
+    assert [g.part for g in planner.display_groups(plan)] == ["NEWPART-9", "010545-1"]
+    # text sort would give the same order here, so also check a part that sorts first but comes last
+    plan = planner.build_plan(parse_text(SAMPLE_TEXT.replace("NEWPART-9", "000001")),
+                              planner.load_tabs(fake_rows()), {"000001": "S-Beams"})
+    assert [g.part for g in planner.display_groups(plan)] == ["010545-1", "000001"]
+
+
+def test_display_groups_shows_skipped_shipped_lines_and_sorts_parts():
+    text = SAMPLE_TEXT.replace("Daily 10/28/26", "Daily 10/14/26")  # matches the shipped row 3
+    plan = planner.build_plan(parse_text(text), planner.load_tabs(fake_rows()), {"NEWPART-9": "S-Beams"})
+    groups = planner.display_groups(plan)
+    assert [g.part for g in groups] == ["010545-1", "NEWPART-9"]  # 9J order
+    assert planner.SKIPPED in [r.kind for r in groups[0].rows]
+
+
+@pytest.fixture(scope="module")
+def gui(tmp_path_factory):
+    """One real (hidden) app window shared by the GUI tests: Tk in this venv on Windows can fail
+    to initialise when a second window is created after the first was destroyed."""
+    old = os.environ.get("APPDATA")
+    os.environ["APPDATA"] = str(tmp_path_factory.mktemp("appdata"))
+    from nine_j_helper import app as app_mod
+    try:
+        a = app_mod.App()
+    except Exception as e:  # noqa: BLE001 - no display / no Tk
+        if old is None:
+            os.environ.pop("APPDATA", None)
+        else:
+            os.environ["APPDATA"] = old
+        pytest.skip(f"cannot open window: {e}")
+    a.withdraw()
+    yield a
+    a.destroy()
+    if old is None:
+        os.environ.pop("APPDATA", None)
+    else:
+        os.environ["APPDATA"] = old
+
+
+def test_group_table_draws_boxes_and_summary_fills(gui):
+    from nine_j_helper.group_table import BOX_W, GroupTable
+    plan = planner.build_plan(parse_text(SAMPLE_TEXT), planner.load_tabs(fake_rows()))
+    t = GroupTable(gui)
+    t.pack(fill="both", expand=True)
+    gui.geometry("900x400")
+    gui.update()
+    t.show(planner.display_groups(plan))
+    gui.update()
+    boxes = [i for i in t.body.find_all()
+             if t.body.type(i) == "rectangle" and float(t.body.itemcget(i, "width")) == BOX_W]
+    assert len(boxes) == 2  # one per group (010545-1, needs-a-tab)
+    t.show(planner.display_groups(plan, summary=True), summary=True)
+    gui.update()
+    fills = {t.body.itemcget(i, "fill") for i in t.body.find_all() if t.body.type(i) == "rectangle"}
+    assert {"#c6efce", "#ffc7ce"} <= fills  # green added, red removed
+    assert len(t.head.find_all()) == 5  # no Firm/Plan column
+    t.destroy()
+
+
+def test_app_sort_dropdown_replans_and_summary_disables_it(gui):
+    a = gui
+    a.doc = parse_text(SAMPLE_TEXT)
+    a.tabs = planner.load_tabs(fake_rows())
+    a.cfg.part_tabs["NEWPART-9"] = "Machined Only"
+    a._make_plan()
+    assert a.plan.writes["Machined Only"].rows and a.cfg.sort_order == "date"
+    for key, label in planner.SORTS.items():
+        a.sort_var.set(label)
+        a._on_sort()
+        assert a.cfg.sort_order == key
+    # last choice was "9j": lines are written in the order printed on the 9J
+    assert [p for _, p, _ in _written(a.plan)] == ["010545-1"] * 3 + ["NEWPART-9"]
+    a._show_summary(a.plan, 4)
+    assert str(a.sort_cb.cget("state")) == "disabled"
+    assert "Update complete" in a.info_var.get()

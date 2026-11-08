@@ -117,15 +117,16 @@ def read_basic_filters(book: gspread.Spreadsheet) -> Dict[int, Dict]:
             for s in meta.get("sheets", []) if s.get("basicFilter")}
 
 
-def _filter_extension(flt: Dict, insert_at, insert_count: int, last_row: int):
-    """setBasicFilter request that grows the tab's filter range down to `last_row` (1-based),
-    or None if it already reaches it. Rows inserted inside the filter range join it
-    automatically; rows below its last row (inserted or already there) do not, so they
-    would not be sortable/filterable with the rest."""
+def _filter_extension(flt: Dict, insert_at, insert_count: int, last_row: int, deleted_rows=()):
+    """setBasicFilter request that grows the tab's filter range down to `last_row` (1-based,
+    numbered after the deletes), or None if it already reaches it. Rows deleted inside the filter
+    range shrink it, and rows inserted inside it join it, automatically; rows below its last row
+    (inserted or already there) do not, so they would not be sortable/filterable with the rest."""
     rng = flt.get("range", {})
     end = rng.get("endRowIndex")
     if end is None:
         return None
+    end -= sum(1 for r in deleted_rows if r <= end)  # Sheets shrank the filter for these
     if insert_count and insert_at is not None and insert_at - 1 < end:
         end += insert_count  # Sheets already grew the filter for rows inserted inside it
     if last_row <= end:
@@ -142,21 +143,29 @@ def apply(book: gspread.Spreadsheet, plan: Plan) -> int:
     fresh = load_tabs(read_rows(book))
     for tw in plan.writes.values():
         st = fresh.get(tw.tab)
-        if st is None or any(r not in st.x_rows for r in tw.expected_x_rows):
+        if (st is None or any(r not in st.x_rows for r in tw.expected_x_rows)
+                or any(r not in st.unshipped_rows or st.row_parts[r] != k
+                       for r, k in tw.expected_deleted.items())):
             raise SheetChangedError(
                 f"The '{tw.tab}' tab changed since the 9J was checked. Please load the 9J again.")
 
     sheet_ids = {ws.title: ws.id for ws in book.worksheets()}
     requests = []
-    # Insert extra rows (only when the x rows run out). Bottom-most first per tab is fine:
-    # each tab has at most one insert.
+    # Replace mode: remove the stale unshipped rows first, bottom-most first so the row numbers
+    # of the ones still to go don't move. Everything after this uses post-delete row numbers.
+    for tw in plan.writes.values():
+        for r in sorted(tw.delete_rows, reverse=True):
+            requests.append({"deleteDimension": {
+                "range": {"sheetId": sheet_ids[tw.tab], "dimension": "ROWS",
+                          "startIndex": r - 1, "endIndex": r}}})
+    # Insert extra rows (only when the x rows run out). Each tab has at most one insert.
     for tw in plan.writes.values():
         if tw.insert_count:
             requests.append({"insertDimension": {
                 "range": {"sheetId": sheet_ids[tw.tab], "dimension": "ROWS",
                           "startIndex": tw.insert_at - 1,
                           "endIndex": tw.insert_at - 1 + tw.insert_count},
-                "inheritFromBefore": True}})
+                "inheritFromBefore": False}})  # never copy the row above (it is often a green shipped row)
     # Pull the new rows (and any data rows already below it) into each tab's filter range.
     # Sent as its own request after the rows exist, so the filter sees the final layout.
     filter_requests = []
@@ -165,8 +174,8 @@ def apply(book: gspread.Spreadsheet, plan: Plan) -> int:
         flt = filters.get(sheet_ids[tw.tab])
         if not flt:
             continue
-        last_row = max(max(tw.rows), fresh[tw.tab].last_data_row or 0)
-        ext = _filter_extension(flt, tw.insert_at, tw.insert_count, last_row)
+        last_row = max(max(tw.rows, default=0), tw.last_data_row)
+        ext = _filter_extension(flt, tw.insert_at, tw.insert_count, last_row, tw.delete_rows)
         if ext:
             ext["setBasicFilter"]["filter"]["range"]["sheetId"] = sheet_ids[tw.tab]
             filter_requests.append(ext)
@@ -201,7 +210,8 @@ def apply(book: gspread.Spreadsheet, plan: Plan) -> int:
             data.append({"range": f"{_quote(tw.tab)}!{col_letter(lo)}{r}:{col_letter(hi)}{r}",
                          "values": [values]})
             count += 1
-    book.values_batch_update({"valueInputOption": "USER_ENTERED", "data": data})
+    if data:
+        book.values_batch_update({"valueInputOption": "USER_ENTERED", "data": data})
     if filter_requests:
         book.batch_update({"requests": filter_requests})
     return count
