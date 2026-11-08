@@ -355,7 +355,7 @@ def test_google_apply_builds_requests():
             "range": {"sheetId": 1, "dimension": "ROWS", "startIndex": 3, "endIndex": 4}}},
         {"insertDimension": {  # then 2 rows after the (shifted) x rows 4-5
             "range": {"sheetId": 1, "dimension": "ROWS", "startIndex": 5, "endIndex": 7},
-            "inheritFromBefore": True}},
+            "inheritFromBefore": False}},
         _color_req(4, BLUE),  # 010545-1 keeps its blue; row 6 (new part) untouched
         _color_req(5, BLUE),
         _color_req(7, BLUE),

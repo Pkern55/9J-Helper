@@ -165,7 +165,7 @@ def apply(book: gspread.Spreadsheet, plan: Plan) -> int:
                 "range": {"sheetId": sheet_ids[tw.tab], "dimension": "ROWS",
                           "startIndex": tw.insert_at - 1,
                           "endIndex": tw.insert_at - 1 + tw.insert_count},
-                "inheritFromBefore": True}})
+                "inheritFromBefore": False}})  # never copy the row above (it is often a green shipped row)
     # Pull the new rows (and any data rows already below it) into each tab's filter range.
     # Sent as its own request after the rows exist, so the filter sees the final layout.
     filter_requests = []
