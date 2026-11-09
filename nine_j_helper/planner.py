@@ -157,6 +157,7 @@ class TabState:
     unshipped_rows: List[int] = field(default_factory=list)
     row_parts: Dict[int, str] = field(default_factory=dict)  # data row -> part_key
     parts: set = field(default_factory=set)
+    part_labels: Dict[str, str] = field(default_factory=dict)  # part_key -> text as on the sheet
     # Part Number text color of each part's most recent row (None = default/black).
     latest_color: Dict[str, object] = field(default_factory=dict)
 
@@ -176,6 +177,7 @@ class TabState:
             st.data_rows.append(r + 1)
             k = part_key(p)
             st.parts.add(k)
+            st.part_labels.setdefault(k, part_text(p))
             st.row_parts[r + 1] = k
             st.latest_color[k] = colors.get(r + 1)  # later rows overwrite earlier ones
             s = serial_of(_cell(row, layout.date))
@@ -295,6 +297,19 @@ def _route(line: ScheduleLine, tabs: Dict[str, TabState], overrides: Dict[str, s
     if len(having) > 1:
         return None, having, "part is on several tabs"
     return None, list(tabs), "new part"
+
+
+def known_parts(tabs: Optional[Dict[str, "TabState"]], overrides: Dict[str, str]) -> Dict[str, List[Tuple[str, str]]]:
+    """What the app knows about where parts go: {tab: [(part, source)]}, parts sorted.
+    source is "sheet" (the part already has rows on that tab) or "remembered" (you chose the
+    tab for it earlier and it has no rows there yet)."""
+    out: Dict[str, Dict[str, Tuple[str, str]]] = {name: {} for name in (tabs or {})}
+    for name, st in (tabs or {}).items():
+        for k in st.parts:
+            out[name][k] = (st.part_labels.get(k, k), "sheet")
+    for part, tab in overrides.items():
+        out.setdefault(tab, {}).setdefault(part_key(part), (part_text(part), "remembered"))
+    return {tab: sorted(d.values(), key=lambda t: t[0]) for tab, d in out.items()}
 
 
 def formula_cells(lay: TabLayout, row: int, part: str) -> Dict[int, object]:

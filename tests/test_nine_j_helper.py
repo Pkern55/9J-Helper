@@ -790,3 +790,13 @@ def test_google_apply_test_mode_deletes_nothing_and_highlights():
 
 def test_pre_delete_row_mapping():
     assert [google_book._pre_delete_row(r, [2, 5]) for r in (1, 2, 3, 4, 5)] == [1, 3, 4, 6, 7]
+
+
+def test_known_parts_lists_sheet_parts_and_remembered_choices():
+    tabs = planner.load_tabs(fake_rows())
+    known = planner.known_parts(tabs, {"NEWPART-9": "Machined Only", "010545-1": "Machined Only"})
+    machined = dict(known["Machined Only"])
+    assert machined["010545-1"] == "sheet"  # on the sheet wins over a remembered choice
+    assert machined["NEWPART-9"] == "remembered"
+    assert list(known) == list(tabs)
+    assert planner.known_parts(None, {"A-1": "Tab X"}) == {"Tab X": [("A-1", "remembered")]}

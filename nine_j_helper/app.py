@@ -13,7 +13,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from . import __version__, config, google_book, updates
 from .nine_j import NineJParseError, parse_pdf
 from .group_table import GroupTable
-from .planner import DEFAULT_SORT, DUPLICATE, SORTS, build_plan, display_groups
+from .planner import DEFAULT_SORT, DUPLICATE, SORTS, build_plan, display_groups, known_parts
 
 TITLE = f"9J Helper {__version__}"
 
@@ -81,6 +81,7 @@ class App(tk.Tk):
         ttk.Label(bottom, textvariable=self.status_var).pack(side="left")
         self.update_btn = ttk.Button(bottom, text="Update Sheet", command=self.update_sheet, state="disabled")
         self.update_btn.pack(side="right")
+        ttk.Button(bottom, text="Known parts…", command=self.show_known_parts).pack(side="right", padx=(0, 12))
         self.test_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(bottom, text="Test mode (highlight only: red = would delete, pink = added)",
                         variable=self.test_var).pack(side="right", padx=12)
@@ -313,6 +314,32 @@ class App(tk.Tk):
             self._show_summary(plan, result)
 
         self._run("Updating the Google Sheet…", lambda: google_book.apply(book, plan, test_mode=test), done)
+
+    def show_known_parts(self):
+        """A window listing which part numbers the app will send to each tab."""
+        known = known_parts(self.tabs, self.cfg.part_tabs)
+        win = tk.Toplevel(self)
+        win.title("Known parts")
+        win.geometry("520x480")
+        win.transient(self)
+        note = ("Parts already on each tab of the sheet, plus tabs you picked earlier."
+                if self.tabs else
+                "The sheet hasn't been read yet, so only your earlier tab choices are shown. "
+                "Load a 9J to see the parts on each tab.")
+        ttk.Label(win, text=note, wraplength=480, justify="left").pack(fill="x", padx=10, pady=8)
+        tree = ttk.Treeview(win, columns=("source",), show="tree headings")
+        tree.heading("#0", text="Tab / part number")
+        tree.heading("source", text="Known from")
+        tree.column("source", width=110, anchor="w")
+        sb = ttk.Scrollbar(win, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y", padx=(0, 6), pady=(0, 8))
+        tree.pack(fill="both", expand=True, padx=(10, 0), pady=(0, 8))
+        for tab, parts in known.items():
+            node = tree.insert("", "end", text=f"{tab}  ({len(parts)})", open=True)
+            for part, source in parts:
+                tree.insert(node, "end", text=part,
+                            values=("on the sheet" if source == "sheet" else "your choice",))
 
     def _show_summary(self, plan, added):
         """Replace the preview with a record of what the update just did (green = added,
