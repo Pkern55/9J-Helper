@@ -108,6 +108,13 @@ For each 9J line:
 - `group_table.py`: `GroupTable` Canvas widget (thick box per part group; summary fills green added /
   red removed; boxes ordered by each part's first appearance on the 9J), fed by `planner.display_groups(plan, summary)`. The sort dropdown re-plans on the
   already-loaded sheet. No Firm/Plan column in the GUI (the parser still has it).
+- `updates.py`: `check(client, sheet_id, current)` reads tab 1 of the private "9J Helper updates" sheet
+  (A/B pairs: version, download, notes) and returns info only for a newer version with an https link;
+  never raises. `config.UPDATE_SHEET_ID` (empty = off). `app.py` calls it once per run inside the
+  sheet-loading worker and shows a yellow banner (`_show_update_banner`). Release routine is in the README
+  (`tools/publish_update.py`: build, selftest, upload to Drive with the narrow `drive.file` scope, MD5-check, then
+  write version/link/notes to the sheet; `Drive`/`publish()` are fakeable and tested in
+  `tests/test_publish_update.py`). NEVER run it, or edit Drive/the sheet, without the user asking.
 - `app.py`: Tkinter UI, background thread for Google calls. `config.py`: settings in
   `%APPDATA%\9J Helper\` (`config.json` = sheet ID/title, part→tab choices, last folder;
   `token.json` = Google sign-in; `client_secret.json` may also live here).

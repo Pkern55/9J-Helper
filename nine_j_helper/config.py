@@ -9,6 +9,8 @@ import sys
 from typing import Dict, Optional
 
 APP_NAME = "9J Helper"
+# Google Sheet that publishes the latest app version (see updates.py). Empty = no update check.
+UPDATE_SHEET_ID = "1KeofYPnAD9t_lKnA85tGVcnkiELz9oIFf6a5ke_oXUk"
 CLIENT_SECRET_NAME = "client_secret.json"
 
 
