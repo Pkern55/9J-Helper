@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import date
 from typing import Dict, List
 
@@ -34,8 +34,11 @@ def open_book(client: gspread.Client, spreadsheet_id: str) -> gspread.Spreadshee
     return client.open_by_key(spreadsheet_id)
 
 
+BACKUP_PREFIX = "9J Helper backup - "  # hidden tabs holding the pre-update copy used by Undo
+
+
 def read_rows(book: gspread.Spreadsheet) -> Dict[str, List[List]]:
-    worksheets = book.worksheets()
+    worksheets = [ws for ws in book.worksheets() if not ws.title.startswith(BACKUP_PREFIX)]
     ranges = ["'" + ws.title.replace("'", "''") + "'" for ws in worksheets]
     resp = book.values_batch_get(ranges, params={
         "valueRenderOption": "UNFORMATTED_VALUE",
@@ -181,7 +184,9 @@ def apply(book: gspread.Spreadsheet, plan: Plan, test_mode: bool = False) -> int
             raise SheetChangedError(
                 f"The '{tw.tab}' tab changed since the 9J was checked. Please load the 9J again.")
 
-    sheet_ids = {ws.title: ws.id for ws in book.worksheets()}
+    worksheets = book.worksheets()
+    sheet_ids = {ws.title: ws.id for ws in worksheets}
+    grid_rows = {ws.title: ws.row_count for ws in worksheets}
     requests = []
     # Replace mode: remove the stale unshipped rows first, bottom-most first so the row numbers
     # of the ones still to go don't move. Everything after this uses post-delete row numbers.
@@ -193,11 +198,19 @@ def apply(book: gspread.Spreadsheet, plan: Plan, test_mode: bool = False) -> int
     # Insert extra rows (only when the x rows run out). Each tab has at most one insert.
     for tw in writes.values():
         if tw.insert_count:
-            requests.append({"insertDimension": {
-                "range": {"sheetId": sheet_ids[tw.tab], "dimension": "ROWS",
-                          "startIndex": tw.insert_at - 1,
-                          "endIndex": tw.insert_at - 1 + tw.insert_count},
-                "inheritFromBefore": False}})  # never copy the row above (it is often a green shipped row)
+            start = tw.insert_at - 1
+            grid = grid_rows.get(tw.tab, 0) - (0 if test_mode else len(tw.delete_rows))
+            if start >= grid:
+                # Past the end of the grid (data fills the whole tab): Sheets refuses an insert
+                # there, so grow the grid at the bottom instead.
+                requests.append({"appendDimension": {
+                    "sheetId": sheet_ids[tw.tab], "dimension": "ROWS",
+                    "length": start + tw.insert_count - grid}})
+            else:
+                requests.append({"insertDimension": {
+                    "range": {"sheetId": sheet_ids[tw.tab], "dimension": "ROWS",
+                              "startIndex": start, "endIndex": start + tw.insert_count},
+                    "inheritFromBefore": False}})  # never copy the row above (it is often a green shipped row)
     # Pull the new rows (and any data rows already below it) into each tab's filter range.
     # Sent as its own request after the rows exist, so the filter sees the final layout.
     filter_requests = []
@@ -261,3 +274,78 @@ def apply(book: gspread.Spreadsheet, plan: Plan, test_mode: bool = False) -> int
     if filter_requests:
         book.batch_update({"requests": filter_requests})
     return count
+
+
+# ---------------------------------------------------------------- undo
+
+@dataclass
+class TabBackup:
+    tab: str
+    sheet_id: int
+    backup_id: int
+    rows: int
+    cols: int
+    filter: Dict = None  # the tab's basicFilter before the update, if it had one
+
+
+@dataclass
+class Backup:
+    tabs: List[TabBackup]
+
+
+def make_backup(book: gspread.Spreadsheet, tab_names: List[str]) -> Backup:
+    """Copy each tab to a hidden 'backup' tab so the update can be undone. Any older backup
+    tabs are deleted first (only the latest update can be undone)."""
+    worksheets = book.worksheets()
+    filters = read_basic_filters(book)
+    used_ids = {ws.id for ws in worksheets}
+    requests = [{"deleteSheet": {"sheetId": ws.id}}
+                for ws in worksheets if ws.title.startswith(BACKUP_PREFIX)]
+    tabs = []
+    next_id = max(used_ids | {0}) + 1000
+    for ws in worksheets:
+        if ws.title not in tab_names:
+            continue
+        bid = next_id
+        next_id += 1
+        requests.append({"duplicateSheet": {
+            "sourceSheetId": ws.id, "newSheetId": bid, "insertSheetIndex": len(worksheets),
+            "newSheetName": (BACKUP_PREFIX + ws.title)[:100]}})
+        requests.append({"updateSheetProperties": {
+            "properties": {"sheetId": bid, "hidden": True}, "fields": "hidden"}})
+        tabs.append(TabBackup(ws.title, ws.id, bid, ws.row_count, ws.col_count,
+                              filters.get(ws.id)))
+    if requests:
+        book.batch_update({"requests": requests})
+    return Backup(tabs)
+
+
+def undo(book: gspread.Spreadsheet, backup: Backup) -> None:
+    """Put each backed-up tab back exactly as it was (values, formulas, formatting, filter),
+    then delete the backup tabs."""
+    existing = {ws.id for ws in book.worksheets()}
+    for tb in backup.tabs:
+        if tb.backup_id not in existing or tb.sheet_id not in existing:
+            raise RuntimeError(f"The backup of '{tb.tab}' is gone, so it can't be undone.")
+    requests = []
+    for tb in backup.tabs:
+        sid = tb.sheet_id
+        requests += [
+            {"clearBasicFilter": {"sheetId": sid}},
+            {"unmergeCells": {"range": {"sheetId": sid}}},
+            {"updateSheetProperties": {
+                "properties": {"sheetId": sid, "gridProperties": {
+                    "rowCount": tb.rows, "columnCount": tb.cols}},
+                "fields": "gridProperties.rowCount,gridProperties.columnCount"}},
+            {"updateCells": {"range": {"sheetId": sid},
+                             "fields": "userEnteredValue,userEnteredFormat"}},
+            {"copyPaste": {"source": {"sheetId": tb.backup_id}, "destination": {"sheetId": sid},
+                           "pasteType": "PASTE_NORMAL", "pasteOrientation": "NORMAL"}},
+        ]
+        if tb.filter:
+            requests.append({"setBasicFilter": {"filter": {
+                **{k: v for k, v in tb.filter.items() if k != "criteria"},
+                "range": {**tb.filter.get("range", {}), "sheetId": sid}}}})
+        requests.append({"deleteSheet": {"sheetId": tb.backup_id}})
+    if requests:
+        book.batch_update({"requests": requests})

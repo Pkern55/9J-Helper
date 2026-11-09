@@ -283,8 +283,8 @@ def test_cell_value_protects_numeric_text():
 
 
 class FakeWS:
-    def __init__(self, title, id_):
-        self.title, self.id = title, id_
+    def __init__(self, title, id_, row_count=1000, col_count=26):
+        self.title, self.id, self.row_count, self.col_count = title, id_, row_count, col_count
 
 
 class FakeBook:
@@ -296,7 +296,7 @@ class FakeBook:
         self.meta = {"sheets": []}
 
     def worksheets(self):
-        return [FakeWS(t, i) for i, t in enumerate(self.rows)]
+        return [FakeWS(t, i, getattr(self, "row_count", 1000)) for i, t in enumerate(self.rows)]
 
     def values_batch_get(self, ranges, params=None):
         return {"valueRanges": [{"values": self.rows[t]} for t in self.rows]}
@@ -382,6 +382,64 @@ def test_filter_extension_grows_to_last_row():
     # inserted inside the filter: Sheets grows it itself (34 -> 37), so 36 is already covered
     assert google_book._filter_extension(flt, insert_at=10, insert_count=3, last_row=36) is None
     assert google_book._filter_extension({}, None, 0, last_row=5) is None
+
+
+def test_google_apply_appends_rows_when_insert_is_past_the_end_of_the_grid():
+    # Sheets rejects insertDimension with startIndex >= grid size ("must be less than the grid size").
+    rows = fake_rows()
+    book = FakeBook(rows)
+    tabs = planner.load_tabs(rows, {"Machined Only": {4: BLUE}})
+    plan = planner.build_plan(parse_text(SAMPLE_TEXT), tabs, {"NEWPART-9": "Machined Only"})
+    tw = plan.writes["Machined Only"]
+    book.row_count = tw.insert_at - 1 + len(tw.delete_rows)  # grid ends right where rows go in
+    google_book.apply(book, plan)
+    reqs = book.batches[0]["requests"]
+    assert not any("insertDimension" in r for r in reqs)
+    assert {"appendDimension": {"sheetId": 1, "dimension": "ROWS",
+                                "length": tw.insert_count}} in reqs
+
+
+def test_google_backup_then_undo_restores_tab_and_filter():
+    rows = fake_rows()
+    book = FakeBook(rows)
+    flt = {"range": {"startRowIndex": 1, "endRowIndex": 6, "endColumnIndex": 10},
+           "criteria": {"0": {}}, "filterSpecs": [{"columnIndex": 0}]}
+    book.meta = {"sheets": [{"properties": {"sheetId": 1}, "basicFilter": flt}]}
+    backup = google_book.make_backup(book, ["Machined Only"])
+    reqs = book.batches[0]["requests"]
+    dup = reqs[0]["duplicateSheet"]
+    assert dup["sourceSheetId"] == 1 and dup["newSheetName"] == google_book.BACKUP_PREFIX + "Machined Only"
+    assert reqs[1]["updateSheetProperties"]["properties"]["hidden"] is True
+    assert [t.tab for t in backup.tabs] == ["Machined Only"] and backup.tabs[0].filter == flt
+
+    # the backup tab exists now; Undo copies it back over the tab, then deletes it
+    bid = backup.tabs[0].backup_id
+    book.worksheets = lambda: [FakeWS("Machined Only", 1), FakeWS(google_book.BACKUP_PREFIX + "Machined Only", bid)]
+    google_book.undo(book, backup)
+    ureqs = book.batches[-1]["requests"]
+    kinds = [next(iter(r)) for r in ureqs]
+    assert kinds == ["clearBasicFilter", "unmergeCells", "updateSheetProperties", "updateCells",
+                     "copyPaste", "setBasicFilter", "deleteSheet"]
+    assert ureqs[4]["copyPaste"]["source"] == {"sheetId": bid}
+    assert ureqs[5]["setBasicFilter"]["filter"]["range"]["sheetId"] == 1
+    assert "criteria" not in ureqs[5]["setBasicFilter"]["filter"]
+    assert ureqs[6] == {"deleteSheet": {"sheetId": bid}}
+
+
+def test_google_undo_refuses_if_backup_tab_is_gone():
+    book = FakeBook(fake_rows())
+    backup = google_book.Backup([google_book.TabBackup("Machined Only", 1, 999, 25, 10)])
+    with pytest.raises(RuntimeError):
+        google_book.undo(book, backup)
+
+
+def test_google_read_rows_ignores_backup_tabs():
+    rows = fake_rows()
+    book = FakeBook(rows)
+    names = list(rows)
+    book.worksheets = lambda: [FakeWS(n, i) for i, n in enumerate(names)] + [
+        FakeWS(google_book.BACKUP_PREFIX + names[0], 99)]
+    assert list(google_book.read_rows(book)) == names
 
 
 def test_google_apply_sets_default_color_and_borders():

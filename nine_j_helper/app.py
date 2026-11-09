@@ -32,6 +32,7 @@ class App(tk.Tk):
         self.tabs = None
         self.doc = None
         self.plan = None
+        self.last_backup = None  # what Undo restores (the last update only)
         self.jobs: "queue.Queue" = queue.Queue()
         self._update_checked = False
         self._banner = None
@@ -81,6 +82,9 @@ class App(tk.Tk):
         ttk.Label(bottom, textvariable=self.status_var).pack(side="left")
         self.update_btn = ttk.Button(bottom, text="Update Sheet", command=self.update_sheet, state="disabled")
         self.update_btn.pack(side="right")
+        self.undo_btn = ttk.Button(bottom, text="Undo last update", command=self.undo_update,
+                                   state="disabled")
+        self.undo_btn.pack(side="right", padx=(0, 8))
         ttk.Button(bottom, text="Known parts…", command=self.show_known_parts).pack(side="right", padx=(0, 12))
         self.test_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(bottom, text="Test mode (highlight only: red = would delete, pink = added)",
@@ -97,6 +101,7 @@ class App(tk.Tk):
         self.status_var.set(label)
         self.browse_btn.configure(state="disabled")
         self.update_btn.configure(state="disabled")
+        self.undo_btn.configure(state="disabled")
         self.sort_cb.configure(state="disabled")
 
         def worker():
@@ -113,6 +118,7 @@ class App(tk.Tk):
                 done, result, err = self.jobs.get_nowait()
                 self.browse_btn.configure(state="normal")
                 self.sort_cb.configure(state="readonly")
+                self.undo_btn.configure(state="normal" if self.last_backup else "disabled")
                 self.status_var.set("")
                 done(result, err)
         except queue.Empty:
@@ -297,9 +303,16 @@ class App(tk.Tk):
             return
         plan, book = self.plan, self.book
 
+        def work():
+            # Copy the tabs first so "Undo last update" can put them back exactly.
+            self.last_backup = google_book.make_backup(book, list(plan.writes))
+            return google_book.apply(book, plan, test_mode=test)
+
         def done(result, err):
             if err:
-                messagebox.showerror(TITLE, f"The sheet was NOT updated:\n\n{err}")
+                messagebox.showerror(TITLE, f"The sheet was NOT updated:\n\n{err}"
+                                     + ("\n\nIf anything changed, use Undo last update."
+                                        if self.last_backup else ""))
                 return
             if test:
                 messagebox.showinfo(TITLE, f"Test done. Highlighted {plan.removed_count} row(s) "
@@ -313,7 +326,33 @@ class App(tk.Tk):
             # rows. Show what was done until a new 9J is chosen.
             self._show_summary(plan, result)
 
-        self._run("Updating the Google Sheet…", lambda: google_book.apply(book, plan, test_mode=test), done)
+        self.last_backup = None
+        self._run("Updating the Google Sheet…", work, done)
+
+    def undo_update(self):
+        """Restore the tabs the last update touched to how they were just before it."""
+        backup, book = self.last_backup, self.book
+        if not backup or book is None:
+            return
+        tabs = ", ".join(t.tab for t in backup.tabs)
+        if not messagebox.askyesno(
+                TITLE, f"Undo the last update? This puts these tabs back exactly as they were "
+                       f"before it: {tabs}.\n\nAnything edited on them since then will be lost."):
+            return
+
+        def done(_result, err):
+            if err:
+                messagebox.showerror(TITLE, f"Couldn't undo:\n\n{err}")
+                return
+            self.last_backup = None
+            self.undo_btn.configure(state="disabled")
+            messagebox.showinfo(TITLE, "Undone. The sheet is back as it was before the update.")
+            if self.doc:  # show the preview again, from the restored sheet
+                self._load_sheet_and_plan()
+            else:
+                self.status_var.set("Undone.")
+
+        self._run("Undoing the last update…", lambda: google_book.undo(book, backup), done)
 
     def show_known_parts(self):
         """A window listing which part numbers the app will send to each tab."""
