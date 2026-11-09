@@ -112,7 +112,9 @@ For each 9J line:
   (A/B pairs: version, download, notes) and returns info only for a newer version with an https link;
   never raises. `config.UPDATE_SHEET_ID` (empty = off). `app.py` calls it once per run inside the
   sheet-loading worker and shows a yellow banner (`_show_update_banner`). Release routine is in the README
-  (upload new version in Drive, edit one cell). Never edit Drive/the sheet without asking the user.
+  (`tools/publish_update.py`: build, selftest, upload to Drive with the narrow `drive.file` scope, MD5-check, then
+  write version/link/notes to the sheet; `Drive`/`publish()` are fakeable and tested in
+  `tests/test_publish_update.py`). NEVER run it, or edit Drive/the sheet, without the user asking.
 - `app.py`: Tkinter UI, background thread for Google calls. `config.py`: settings in
   `%APPDATA%\9J Helper\` (`config.json` = sheet ID/title, part→tab choices, last folder;
   `token.json` = Google sign-in; `client_secret.json` may also live here).

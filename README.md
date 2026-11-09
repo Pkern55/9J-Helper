@@ -152,12 +152,33 @@ the app (the app can already read Google Sheets, so there is no extra sign-in).
    `UPDATE_SHEET_ID` in `nine_j_helper/config.py`, then build and release that version. Until this
    is filled in, the app does no update check.
 
-**Each new version**
-1. Bump `__version__`, build `dist\9J-Helper.exe`.
-2. In Drive, open the exe file, **Manage versions → Upload new version** (the share link stays the same).
-3. Change `version` in the updates sheet to the new number. Users see the bar the next time they
-   open a 9J (the check runs once per run, when the app signs in to Google). It never blocks
-   anything: if the check fails, nothing is shown.
+**Each new version (one command)**
+
+1. Bump `__version__` in `nine_j_helper/__init__.py`.
+2. Run:
+
+   ```
+   .venv\Scripts\python tools\publish_update.py --notes "What's new"
+   ```
+
+   It builds the exe, runs its self-test, uploads it to Drive, checks the upload arrived intact,
+   and only then writes the new version (and link and notes) into the updates sheet. It asks you
+   to type `yes` first (or pass `--yes`) and refuses to publish a version older than the sheet's
+   (`--force` overrides). Users see the yellow bar the next time they open a 9J. The check never
+   blocks anything: if it fails, nothing is shown.
+
+**One-time setup for the script**
+- In the same Google Cloud project as the app, enable the **Google Drive API**
+  (APIs & Services → Library).
+- The first run opens a browser to approve access. The script only gets Google's `drive.file`
+  permission, so it can only touch the Drive file it creates itself, not the rest of your Drive.
+  Its sign-in is saved as `publish_token.json` in `%APPDATA%\9J Helper\`.
+- The first run also **creates** the Drive file and prints its link. Send that link to the user
+  once, and share the file with their Google account (or pass `--share their@email`). After that,
+  every run uploads a new version of the same file, so the link never changes.
+
+*Doing it by hand instead:* in Drive, open the exe, **Manage versions → Upload new version**, then
+change `version` in the sheet. Upload first, then change the number.
 
 **How the user upgrades:** click **Download** in the bar, close the app, replace the old
 `9J-Helper.exe` with the new file, and open it. The window title shows the new version. Settings and
