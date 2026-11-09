@@ -81,6 +81,9 @@ class App(tk.Tk):
         ttk.Label(bottom, textvariable=self.status_var).pack(side="left")
         self.update_btn = ttk.Button(bottom, text="Update Sheet", command=self.update_sheet, state="disabled")
         self.update_btn.pack(side="right")
+        self.test_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(bottom, text="Test mode (highlight only: red = would delete, pink = added)",
+                        variable=self.test_var).pack(side="right", padx=12)
 
     def _refresh_sheet_label(self):
         if self.cfg.spreadsheet_id:
@@ -281,9 +284,15 @@ class App(tk.Tk):
         if not self.plan or not self.plan.has_changes:
             return
         tabs = ", ".join(self.plan.writes)
-        if not messagebox.askyesno(
-                TITLE, f"Remove {self.plan.removed_count} unshipped row(s) and add "
-                       f"{self.plan.new_count} line(s) on: {tabs}?"):
+        test = bool(self.test_var.get())
+        if test:
+            question = (f"TEST MODE: nothing will be deleted. Highlight {self.plan.removed_count} "
+                        f"row(s) in red (would be removed) and add {self.plan.new_count} line(s) "
+                        f"with a pink fill on: {tabs}?")
+        else:
+            question = (f"Remove {self.plan.removed_count} unshipped row(s) and add "
+                        f"{self.plan.new_count} line(s) on: {tabs}?")
+        if not messagebox.askyesno(TITLE, question):
             return
         plan, book = self.plan, self.book
 
@@ -291,15 +300,19 @@ class App(tk.Tk):
             if err:
                 messagebox.showerror(TITLE, f"The sheet was NOT updated:\n\n{err}")
                 return
-            messagebox.showinfo(TITLE, f"Done! Removed {plan.removed_count} unshipped row(s) and "
-                                       f"added {result} line(s).")
+            if test:
+                messagebox.showinfo(TITLE, f"Test done. Highlighted {plan.removed_count} row(s) "
+                                           f"in red (not deleted) and added {result} line(s) in pink.")
+            else:
+                messagebox.showinfo(TITLE, f"Done! Removed {plan.removed_count} unshipped row(s) and "
+                                           f"added {result} line(s).")
             self.plan = None
             self.update_btn.configure(state="disabled")
             # No re-read of the sheet: it would see the rows we just added as stale unshipped
             # rows. Show what was done until a new 9J is chosen.
             self._show_summary(plan, result)
 
-        self._run("Updating the Google Sheet…", lambda: google_book.apply(book, plan), done)
+        self._run("Updating the Google Sheet…", lambda: google_book.apply(book, plan, test_mode=test), done)
 
     def _show_summary(self, plan, added):
         """Replace the preview with a record of what the update just did (green = added,

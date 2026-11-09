@@ -766,3 +766,27 @@ def test_r_prefix_stripped_description_and_page_repeat():
     assert it.po == "5800531A"
     assert [ln.part for ln in it.lines] == ["006348", "006348"]
     assert all(ln.sheet_part == "006348" for ln in doc.lines)
+
+
+def test_google_apply_test_mode_deletes_nothing_and_highlights():
+    rows = fake_rows()
+    book = FakeBook(rows)
+    plan = planner.build_plan(parse_text(SAMPLE_TEXT), planner.load_tabs(rows),
+                              {"NEWPART-9": "Machined Only"})
+    assert plan.removed_count == 1 and plan.new_count == 4
+    assert google_book.apply(book, plan, test_mode=True) == 4
+    reqs = book.batches[0]["requests"]
+    assert not any("deleteDimension" in r for r in reqs)
+    fills = [r["repeatCell"] for r in reqs
+             if "backgroundColor" in r.get("repeatCell", {}).get("cell", {}).get("userEnteredFormat", {})]
+    red = [f for f in fills if f["cell"]["userEnteredFormat"]["backgroundColor"] == google_book.TEST_DELETE_FILL]
+    pink = [f for f in fills if f["cell"]["userEnteredFormat"]["backgroundColor"] == google_book.TEST_ADD_FILL]
+    assert [(f["range"]["startRowIndex"], f["range"]["endRowIndex"]) for f in red] == [(3, 4)]  # row 4
+    # Row numbers are as the sheet is now (row 4 still exists), so adds shift down one row.
+    written = sorted(int(d["range"].split("!")[1][1:].split(":")[0][0:]) for d in book.values["data"])
+    assert written == [5, 6, 7, 8]
+    assert [(f["range"]["startRowIndex"], f["range"]["endRowIndex"]) for f in pink] == [(4, 8)]
+
+
+def test_pre_delete_row_mapping():
+    assert [google_book._pre_delete_row(r, [2, 5]) for r in (1, 2, 3, 4, 5)] == [1, 3, 4, 6, 7]

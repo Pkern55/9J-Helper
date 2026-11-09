@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from datetime import date
 from typing import Dict, List
 
 import gspread
 
 from . import config
-from .planner import Plan, col_letter, load_tabs, order_tab_names
+from .planner import Plan, TabWrite, col_letter, load_tabs, order_tab_names
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
@@ -136,10 +137,41 @@ def _filter_extension(flt: Dict, insert_at, insert_count: int, last_row: int, de
     return {"setBasicFilter": {"filter": new}}
 
 
-def apply(book: gspread.Spreadsheet, plan: Plan) -> int:
-    """Write the plan. Re-reads the sheet first and refuses if the target rows changed."""
+TEST_DELETE_FILL = {"red": 1.0, "green": 0.2, "blue": 0.2}  # rows that would be deleted
+TEST_ADD_FILL = {"red": 1.0, "green": 0.75, "blue": 0.85}  # rows that are added
+
+
+def _pre_delete_row(row: int, deleted) -> int:
+    """Map a row number counted after the deletes back to its number on the sheet as it is now."""
+    for d in sorted(deleted):
+        if d <= row:
+            row += 1
+    return row
+
+
+def _without_deletes(tw: TabWrite) -> TabWrite:
+    """The same writes for a sheet where nothing is deleted: row numbers go back to the
+    current-sheet numbering, and `delete_rows` is kept only for the caller to highlight."""
+    m = lambda r: _pre_delete_row(r, tw.delete_rows)
+    return replace(
+        tw,
+        rows={m(r): cells for r, cells in tw.rows.items()},
+        text_colors={m(r): c for r, c in tw.text_colors.items()},
+        insert_at=None if tw.insert_at is None else m(tw.insert_at),
+        last_data_row=m(tw.last_data_row) if tw.delete_rows else tw.last_data_row,
+    )
+
+
+def apply(book: gspread.Spreadsheet, plan: Plan, test_mode: bool = False) -> int:
+    """Write the plan. Re-reads the sheet first and refuses if the target rows changed.
+
+    Test mode deletes nothing: the rows that would be deleted get a red fill, and the rows
+    that are added get a pink fill."""
     if not plan.writes:
         return 0
+    writes = plan.writes
+    if test_mode:
+        writes = {name: _without_deletes(tw) for name, tw in plan.writes.items()}
     fresh = load_tabs(read_rows(book))
     for tw in plan.writes.values():
         st = fresh.get(tw.tab)
@@ -153,13 +185,13 @@ def apply(book: gspread.Spreadsheet, plan: Plan) -> int:
     requests = []
     # Replace mode: remove the stale unshipped rows first, bottom-most first so the row numbers
     # of the ones still to go don't move. Everything after this uses post-delete row numbers.
-    for tw in plan.writes.values():
-        for r in sorted(tw.delete_rows, reverse=True):
+    for tw in writes.values():
+        for r in ([] if test_mode else sorted(tw.delete_rows, reverse=True)):
             requests.append({"deleteDimension": {
                 "range": {"sheetId": sheet_ids[tw.tab], "dimension": "ROWS",
                           "startIndex": r - 1, "endIndex": r}}})
     # Insert extra rows (only when the x rows run out). Each tab has at most one insert.
-    for tw in plan.writes.values():
+    for tw in writes.values():
         if tw.insert_count:
             requests.append({"insertDimension": {
                 "range": {"sheetId": sheet_ids[tw.tab], "dimension": "ROWS",
@@ -170,18 +202,19 @@ def apply(book: gspread.Spreadsheet, plan: Plan) -> int:
     # Sent as its own request after the rows exist, so the filter sees the final layout.
     filter_requests = []
     filters = read_basic_filters(book)
-    for tw in plan.writes.values():
+    for tw in writes.values():
         flt = filters.get(sheet_ids[tw.tab])
         if not flt:
             continue
         last_row = max(max(tw.rows, default=0), tw.last_data_row)
-        ext = _filter_extension(flt, tw.insert_at, tw.insert_count, last_row, tw.delete_rows)
+        ext = _filter_extension(flt, tw.insert_at, tw.insert_count, last_row,
+                                [] if test_mode else tw.delete_rows)
         if ext:
             ext["setBasicFilter"]["filter"]["range"]["sheetId"] = sheet_ids[tw.tab]
             filter_requests.append(ext)
     # Requests run in order, so these use the row numbers after the insert above.
     thin = {"style": "SOLID", "colorStyle": _BLACK}
-    for tw in plan.writes.values():
+    for tw in writes.values():
         sid = sheet_ids[tw.tab]
         # Part Number text color = that part's latest color on the tab (only the color changes).
         for r, color in sorted(tw.text_colors.items()):
@@ -197,12 +230,25 @@ def apply(book: gspread.Spreadsheet, plan: Plan) -> int:
                           "startColumnIndex": 0, "endColumnIndex": tw.border_cols},
                 "top": thin, "bottom": thin, "left": thin, "right": thin,
                 "innerHorizontal": thin, "innerVertical": thin}})
+    if test_mode:
+        def fill(sid, first, last, cols, color):
+            return {"repeatCell": {
+                "range": {"sheetId": sid, "startRowIndex": first - 1, "endRowIndex": last,
+                          "startColumnIndex": 0, "endColumnIndex": cols},
+                "cell": {"userEnteredFormat": {"backgroundColor": color}},
+                "fields": "userEnteredFormat.backgroundColor"}}
+        for name, tw in plan.writes.items():  # numbering: rows as the sheet is now
+            for r in tw.delete_rows:
+                requests.append(fill(sheet_ids[name], r, r, tw.border_cols, TEST_DELETE_FILL))
+        for tw in writes.values():
+            for first, last in tw.row_blocks():
+                requests.append(fill(sheet_ids[tw.tab], first, last, tw.border_cols, TEST_ADD_FILL))
     if requests:
         book.batch_update({"requests": requests})
 
     data = []
     count = 0
-    for tw in plan.writes.values():
+    for tw in writes.values():
         for r, cells in tw.rows.items():
             lo, hi = min(cells), max(cells)
             # None = leave the cell alone (Sheets API skips nulls).
