@@ -5,19 +5,39 @@ Reads a Hendrickson **9J Supplier Schedule** PDF and updates the orders Google S
 
 ## For Dad: using it
 
-1. Download **9J-Helper.exe** from the [Releases page](../../releases/latest) (put it on your Desktop).
-2. Double-click it. The first time, Windows may say *"Windows protected your PC"*:
+### Installing
+
+1. Open the **Google Drive link** you were sent for **9J-Helper.exe** (sign in with your Google
+   account if it asks). Click the **download** button at the top right, and save the file on your
+   **Desktop**. There is nothing to install: the file *is* the program.
+2. Double-click **9J-Helper.exe**. The first time, Windows may say *"Windows protected your PC"*:
    click **More info → Run anyway**.
-   The window title shows the version (e.g. "9J Helper 0.1.1"). To update, download the
-   newest 9J-Helper.exe from the Releases page and replace the old one; your settings and
-   Google sign-in are kept.
-3. Click **Browse…** and pick the 9J PDF from your email/downloads.
-4. The first time only:
+   The window title shows the version (for example "9J Helper 0.4.1").
+
+### Updating to a newer version
+
+When a new version is ready, a **yellow bar** appears at the top of the window the next time you
+pick a 9J: *"A new version of 9J Helper is available…"*. To update:
+
+1. Click **Download** in the yellow bar. Drive opens; click the **download** button and save the
+   file (your browser may add "(1)" to the name; that's fine).
+2. **Close** 9J Helper.
+3. Move the new file onto your Desktop and **replace** the old `9J-Helper.exe` (click **Replace**
+   if asked). Your settings and Google sign-in are kept.
+4. Double-click it. The window title should show the new version number.
+
+If you never see the bar, you are already on the newest version. (The very first time you switch
+from an older version without the bar, use the Drive link you were sent instead.)
+
+### Using it
+
+1. Click **Browse…** and pick the 9J PDF from your email/downloads.
+2. The first time only:
    - Paste the link to your Google Sheet (open the sheet in your browser, copy the address bar).
    - A browser window opens to sign in to Google. You'll see *"Google hasn't verified this app"*:
      click **Advanced → Go to 9J Helper (unsafe)** and then **Continue**. (It's our own app;
      it only gets access to Google Sheets.)
-5. Look over the list. It follows the order of the 9J, with **one thick box around each part's
+3. Look over the list. It follows the order of the 9J, with **one thick box around each part's
    rows** (all the 010545-1 lines together, and so on; boxes in the order the parts appear on the
    9J, rows in date order), so you can check the app's work at a glance:
    - **green "new → row 35"**: will be added at that row
@@ -29,8 +49,8 @@ Reads a Hendrickson **9J Supplier Schedule** PDF and updates the orders Google S
    Use **Add rows to the sheet in this order** to pick how the new rows are written to the sheet:
    *Delivery date, then part* (default), *Part number, then date*, or *Order on the 9J*. The list
    always follows the 9J and stays grouped by part either way; the row numbers in it update to match. Your choice is remembered.
-6. Click **Update Sheet**, then **Yes**.
-7. The list then turns into a summary of what was done: **green rows were added, red rows were
+4. Click **Update Sheet**, then **Yes**.
+5. The list then turns into a summary of what was done: **green rows were added, red rows were
    removed**. It stays until you pick another 9J with **Browse…**.
 
 ### How it updates the sheet (replace mode)
@@ -96,13 +116,20 @@ The app needs a Google OAuth "Desktop" client so it can ask Dad's permission to 
 
 ## Releasing a new version
 
+**What the user gets** comes from Google Drive plus the updates sheet (next section), not from
+GitHub: the repo is private, so the user can't open its Releases page.
+
+**Optional, for your own records:** tagging builds the exe on GitHub and attaches it to a Release
+that only people with repo access can see.
+
 ```
 git tag v0.1.0
 git push origin v0.1.0
 ```
 
 GitHub Actions runs the tests, builds `9J-Helper.exe` and attaches it to a Release.
-(Every push to a pull request also builds the exe as a downloadable workflow artifact.)
+(Every push to a pull request also builds the exe as a downloadable workflow artifact.) Note that
+this build uses the OAuth client secret stored in the repo's Actions secrets.
 
 ## Telling the user about a new version (private, no GitHub account needed)
 
