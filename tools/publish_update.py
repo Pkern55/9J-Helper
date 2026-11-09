@@ -40,7 +40,11 @@ from nine_j_helper import config, updates  # noqa: E402
 SCOPES = ["https://www.googleapis.com/auth/drive.file",
           "https://www.googleapis.com/auth/spreadsheets"]
 EXE = os.path.join(ROOT, "dist", "9J-Helper.exe")
-SAMPLE_PDF = os.path.join(os.path.dirname(ROOT), "Example 9J", "9J_504206_R M KERNER COMPANY 106096.pdf")
+_SAMPLE_NAME = os.path.join("Example 9J", "9J_504206_R M KERNER COMPANY 106096.pdf")
+# The sample 9J lives in the project folder (or, in older setups, the folder above it).
+SAMPLE_PDF = next((p for p in (os.path.join(ROOT, _SAMPLE_NAME),
+                               os.path.join(os.path.dirname(ROOT), _SAMPLE_NAME)) if os.path.exists(p)),
+                  os.path.join(ROOT, _SAMPLE_NAME))
 DRIVE_NAME = "9J-Helper.exe"
 API = "https://www.googleapis.com/drive/v3"
 UPLOAD = "https://www.googleapis.com/upload/drive/v3"
