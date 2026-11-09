@@ -104,6 +104,38 @@ git push origin v0.1.0
 GitHub Actions runs the tests, builds `9J-Helper.exe` and attaches it to a Release.
 (Every push to a pull request also builds the exe as a downloadable workflow artifact.)
 
+## Telling the user about a new version (private, no GitHub account needed)
+
+The app can show a yellow **"A new version of 9J Helper is available"** bar with a **Download**
+button. It reads the latest version from a small Google Sheet shared only with the people who use
+the app (the app can already read Google Sheets, so there is no extra sign-in).
+
+**One-time setup**
+1. Create a Google Sheet "9J Helper updates". On its first tab put, in columns A and B:
+
+   | A | B |
+   |---|---|
+   | version | `0.4.0` |
+   | download | link to the exe in Google Drive |
+   | notes | optional, shown in the bar |
+
+2. Share that sheet (view access is enough) with each person who uses the app.
+3. Upload `9J-Helper.exe` to Drive, share it with the same people, and put its link in `download`.
+4. Put the sheet's ID (the long text between `/d/` and `/edit` in its address) in
+   `UPDATE_SHEET_ID` in `nine_j_helper/config.py`, then build and release that version. Until this
+   is filled in, the app does no update check.
+
+**Each new version**
+1. Bump `__version__`, build `dist\9J-Helper.exe`.
+2. In Drive, open the exe file, **Manage versions → Upload new version** (the share link stays the same).
+3. Change `version` in the updates sheet to the new number. Users see the bar the next time they
+   open a 9J (the check runs once per run, when the app signs in to Google). It never blocks
+   anything: if the check fails, nothing is shown.
+
+**How the user upgrades:** click **Download** in the bar, close the app, replace the old
+`9J-Helper.exe` with the new file, and open it. The window title shows the new version. Settings and
+Google sign-in are kept.
+
 ## Development
 
 ```
@@ -133,5 +165,6 @@ Code layout:
 | `nine_j_helper/google_book.py` | Google sign-in, reading tabs, writing the plan |
 | `nine_j_helper/xlsx_book.py` | same against a local .xlsx (tests / dry runs) |
 | `nine_j_helper/app.py` | the window |
+| `nine_j_helper/updates.py` | reads the latest version from the updates sheet |
 | `nine_j_helper/group_table.py` | the boxed, color-filled list in the window |
 | `nine_j_helper/config.py` | settings in `%APPDATA%\9J Helper` |

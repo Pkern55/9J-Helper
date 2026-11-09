@@ -649,3 +649,94 @@ def test_app_sort_dropdown_replans_and_summary_disables_it(gui):
     a._show_summary(a.plan, 4)
     assert str(a.sort_cb.cget("state")) == "disabled"
     assert "Update complete" in a.info_var.get()
+
+
+# ------------------------------------------------------------------ update check
+
+class FakeSheet1:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def get_values(self, rng):
+        assert rng == "A1:B20"
+        return self.rows
+
+
+class FakeUpdateBook:
+    def __init__(self, rows):
+        self.sheet1 = FakeSheet1(rows)
+
+
+class FakeUpdateClient:
+    def __init__(self, rows=None, error=None):
+        self.rows, self.error, self.opened = rows, error, None
+
+    def open_by_key(self, key):
+        self.opened = key
+        if self.error:
+            raise self.error
+        return FakeUpdateBook(self.rows)
+
+
+UPDATE_ROWS = [["version", "0.4.0"], ["Download", "https://drive.google.com/file/d/abc/view"],
+               ["notes", "adds update notices"], [], ["ignored"]]
+
+
+def test_version_comparison():
+    from nine_j_helper import updates
+    assert updates.parse_version("v0.3.1") == (0, 3, 1) and updates.parse_version(" 1.2 ") == (1, 2)
+    assert updates.parse_version("latest") is None and updates.parse_version(None) is None
+    assert updates.is_newer("0.4.0", "0.3.1") and updates.is_newer("0.3.10", "0.3.9")
+    assert updates.is_newer("1.0", "0.9.9") and updates.is_newer("0.3.1.1", "0.3.1")
+    assert not updates.is_newer("0.3.1", "0.3.1") and not updates.is_newer("0.3", "0.3.0")
+    assert not updates.is_newer("0.3.0", "0.3.1")
+    assert not updates.is_newer("garbage", "0.3.1") and not updates.is_newer("0.4.0", "dev")
+
+
+def test_check_returns_info_only_for_a_newer_version():
+    from nine_j_helper import updates
+    c = FakeUpdateClient(UPDATE_ROWS)
+    info = updates.check(c, "SHEETID", "0.3.1")
+    assert c.opened == "SHEETID"
+    assert info == {"version": "0.4.0", "download": "https://drive.google.com/file/d/abc/view",
+                    "notes": "adds update notices"}
+    assert updates.check(FakeUpdateClient(UPDATE_ROWS), "SHEETID", "0.4.0") is None  # up to date
+    assert updates.check(FakeUpdateClient(UPDATE_ROWS), "SHEETID", "0.5.0") is None  # ahead of it
+
+
+def test_check_never_raises_and_rejects_bad_data():
+    from nine_j_helper import updates
+    assert updates.check(FakeUpdateClient(UPDATE_ROWS), "", "0.3.1") is None  # feature off
+    assert updates.check(FakeUpdateClient(error=RuntimeError("offline")), "ID", "0.3.1") is None
+    assert updates.check(FakeUpdateClient([["version", "soon"]]), "ID", "0.3.1") is None
+    assert updates.check(FakeUpdateClient([["version", "0.4.0"]]), "ID", "0.3.1") is None  # no link
+    # only https links are ever offered
+    assert updates.check(FakeUpdateClient([["version", "0.4.0"], ["download", "file:///c:/x.exe"]]),
+                         "ID", "0.3.1") is None
+    assert updates.check(FakeUpdateClient([["version", "0.4.0"], ["download", "http://x.test/a.exe"]]),
+                         "ID", "0.3.1") is None
+
+
+def test_update_banner_shows_once_and_can_be_closed(gui, monkeypatch):
+    opened = []
+    monkeypatch.setattr("webbrowser.open", lambda url: opened.append(url))
+    info = {"version": "9.9.9", "download": "https://drive.google.com/file/d/abc/view", "notes": "n"}
+    gui._show_update_banner({"version": "9.9.9", "download": "http://insecure.test/x.exe"})
+    assert gui._banner is None  # non-https link is ignored
+    gui._show_update_banner(info)
+    bar = gui._banner
+    assert bar is not None
+    gui._show_update_banner(info)
+    assert gui._banner is bar  # not shown twice
+    gui.update()
+    buttons = {w.cget("text"): w for w in bar.winfo_children() if w.winfo_class() == "Button"}
+    assert set(buttons) == {"Download", "Close"}
+    buttons["Download"].invoke()
+    assert opened == [info["download"]]
+    buttons["Close"].invoke()
+    assert gui._banner is None
+
+
+def test_update_check_is_off_until_a_sheet_is_configured():
+    from nine_j_helper import config
+    assert config.UPDATE_SHEET_ID == "" or len(config.UPDATE_SHEET_ID) > 20

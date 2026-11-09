@@ -7,9 +7,10 @@ import queue
 import threading
 import tkinter as tk
 import traceback
+import webbrowser
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
-from . import __version__, config, google_book
+from . import __version__, config, google_book, updates
 from .nine_j import NineJParseError, parse_pdf
 from .group_table import GroupTable
 from .planner import DEFAULT_SORT, DUPLICATE, SORTS, build_plan, display_groups
@@ -32,6 +33,8 @@ class App(tk.Tk):
         self.doc = None
         self.plan = None
         self.jobs: "queue.Queue" = queue.Queue()
+        self._update_checked = False
+        self._banner = None
         self._build()
         self.after(100, self._poll)
         self._refresh_sheet_label()
@@ -40,6 +43,7 @@ class App(tk.Tk):
     def _build(self):
         pad = {"padx": 8, "pady": 4}
         top = ttk.Frame(self)
+        self._top = top  # the update banner is packed above this
         top.pack(fill="x", **pad)
         ttk.Label(top, text="Google Sheet:").pack(side="left")
         self.sheet_var = tk.StringVar()
@@ -168,13 +172,20 @@ class App(tk.Tk):
             if self.client is None:
                 self.client = google_book.connect()
             book = google_book.open_book(self.client, sid)
-            return book, google_book.load_order_tabs(book)
+            tabs = google_book.load_order_tabs(book)
+            # Once per run, while we're signed in anyway: is there a newer app? (never raises)
+            upd = None if self._update_checked else updates.check(
+                self.client, config.UPDATE_SHEET_ID, __version__)
+            return book, tabs, upd
 
         def done(result, err):
             if err:
                 messagebox.showerror(TITLE, f"Couldn't open the Google Sheet:\n\n{err}")
                 return
-            self.book, self.tabs = result
+            self.book, self.tabs, upd = result
+            self._update_checked = True
+            if upd:
+                self._show_update_banner(upd)
             if not self.tabs:
                 messagebox.showerror(TITLE, "No order tabs (with a 'Part Number' / 'Delivery Date' "
                                             "header) were found in that sheet.")
@@ -186,6 +197,27 @@ class App(tk.Tk):
             self._make_plan()
 
         self._run("Reading the Google Sheet… (a browser window may open to sign in)", work, done)
+
+    def _show_update_banner(self, info):
+        """A yellow bar at the top: a newer version is available, with a download button."""
+        url = info.get("download", "")
+        if self._banner is not None or not url.startswith("https://"):
+            return
+        bar = tk.Frame(self, bg="#fff4ce", highlightbackground="#e0c060", highlightthickness=1)
+        bar.pack(fill="x", padx=8, pady=(6, 0), before=self._top)
+        self._banner = bar
+        notes = f"  ({info['notes']})" if info.get("notes") else ""
+        tk.Label(bar, bg="#fff4ce", anchor="w", justify="left", wraplength=640,
+                 text=f"A new version of 9J Helper is available: {info['version']} "
+                      f"(you have {__version__}).{notes}").pack(side="left", padx=8, pady=6)
+        tk.Button(bar, text="Close", relief="flat", bg="#fff4ce",
+                  command=self._hide_update_banner).pack(side="right", padx=6)
+        tk.Button(bar, text="Download", command=lambda: webbrowser.open(url)).pack(side="right", padx=4)
+
+    def _hide_update_banner(self):
+        if self._banner is not None:
+            self._banner.destroy()
+            self._banner = None
 
     def _make_plan(self):
         self.plan = self._build_plan()
