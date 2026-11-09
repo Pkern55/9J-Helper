@@ -18,13 +18,19 @@ def main(argv=None):
     ap.add_argument("xlsx", help="Excel export of the Google Sheet (read only)")
     ap.add_argument("--sort", choices=list(SORTS), default="date",
                     help="order new rows are added in: " + "; ".join(f"{k} = {v}" for k, v in SORTS.items()))
+    ap.add_argument("--location", help="Location code, if the 9J's Ship To isn't a known one")
     ap.add_argument("--out", help="write the result to this NEW .xlsx file")
     args = ap.parse_args(argv)
 
     doc = parse_pdf(args.pdf)
     print(f"Release {doc.release_id}  date {doc.release_date}  PO {', '.join(doc.pos)}  "
           f"{len(doc.lines)} lines")
-    plan = build_plan(doc, xlsx_book.load_order_tabs(args.xlsx), sort=args.sort)
+    location = args.location or doc.location_code
+    if location is None:
+        raise SystemExit(f"Detected Ship To: {doc.ship_to or '(none)'} - unknown location. "
+                         "Re-run with --location CODE (the code used in the sheet's Location column).")
+    print(f"Ship to: {doc.ship_to}  ->  Location {location}")
+    plan = build_plan(doc, xlsx_book.load_order_tabs(args.xlsx), sort=args.sort, location=location)
     for pl in plan.lines:
         ln = pl.line
         where = f"{pl.tab} row {pl.row}" if pl.row else (pl.tab or ", ".join(pl.candidates))

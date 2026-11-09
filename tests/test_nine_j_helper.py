@@ -687,7 +687,7 @@ def test_group_table_draws_boxes_and_summary_fills(gui):
     gui.update()
     fills = {t.body.itemcget(i, "fill") for i in t.body.find_all() if t.body.type(i) == "rectangle"}
     assert {"#c6efce", "#ffc7ce"} <= fills  # green added, red removed
-    assert len(t.head.find_all()) == 5  # no Firm/Plan column
+    assert len(t.head.find_all()) == 6  # tab, location, part, date, qty, status (no Firm/Plan column)
     t.destroy()
 
 
@@ -858,3 +858,57 @@ def test_known_parts_lists_sheet_parts_and_remembered_choices():
     assert machined["NEWPART-9"] == "remembered"
     assert list(known) == list(tabs)
     assert planner.known_parts(None, {"A-1": "Tab X"}) == {"Tab X": [("A-1", "remembered")]}
+
+
+# ---------------------------------------------------------------- location (ship-to) matching
+
+def _loc_rows():
+    return {"Machined Only": [
+        ["Part Number", "Location", "Deliver Date", "Req Qty", "Ship to Customer", "Shipped Qty",
+         "Balance Due", "Actual Ship Date", "P/S", "Comments", "part number"],
+        ["010545-1", "Haux", _d(2026, 10, 28), 28, 1, None, 28, None, None, None, "010545-1"],
+        ["010545-1", "Dist", _d(2026, 10, 28), 28, 1, None, 28, None, None, None, "010545-1"],
+        ["010545-1", None, _d(2026, 10, 28), 28, 1, None, 28, None, None, None, "010545-1"],
+        ["010545-1", "Dist", _d(2026, 11, 4), 28, 1, 28, 0, _d(2026, 11, 2), 1, None, "010545-1"],
+        ["x"], ["x"], ["x"],
+    ]}
+
+
+def test_ship_to_parsed_and_mapped():
+    from nine_j_helper.nine_j import location_code
+    doc = parse_text("Ship To\nHendrickson Auxiliary Axle\n277 North High Street\n" + SAMPLE_TEXT)
+    assert doc.ship_to == "Hendrickson Auxiliary Axle" and doc.location_code == "Haux"
+    assert location_code("HENDRICKSON  DISTRIBUTION") == "Dist"
+    assert location_code("HENDRICKSON TRAILER C.V.S.") == "Mitc"
+    assert location_code("Somewhere Else") is None
+
+
+def test_only_unshipped_rows_at_the_same_location_are_deleted():
+    plan = planner.build_plan(parse_text(SAMPLE_TEXT), planner.load_tabs(_loc_rows()), location="Haux")
+    tw = plan.writes["Machined Only"]
+    assert tw.delete_rows == [2]  # Dist row and blank-location row stay
+
+
+def test_new_rows_get_the_location_code():
+    plan = planner.build_plan(parse_text(SAMPLE_TEXT), planner.load_tabs(_loc_rows()), location="Dist")
+    tw = plan.writes["Machined Only"]
+    assert tw.delete_rows == [3]
+    assert all(cells[1] == "Dist" for cells in tw.rows.values())
+
+
+def test_shipped_row_at_another_location_is_not_a_duplicate():
+    text = SAMPLE_TEXT.replace("Daily 10/28/26", "Daily 11/04/26")
+    def status(loc):
+        plan = planner.build_plan(parse_text(text), planner.load_tabs(_loc_rows()), location=loc)
+        return {pl.status for pl in plan.lines
+                if pl.line.sheet_part == "010545-1" and pl.line.delivery_date == date(2026, 11, 4)}
+    assert status("Dist") == {planner.DUPLICATE}
+    assert planner.NEW in status("Haux")
+
+
+def test_display_rows_carry_the_location_code():
+    plan = planner.build_plan(parse_text(SAMPLE_TEXT), planner.load_tabs(_loc_rows()), location="Haux")
+    rows = [r for g in planner.display_groups(plan) for r in g.rows]
+    assert rows and all(r.location == "Haux" for r in rows)
+    from nine_j_helper.group_table import row_values, HEADS
+    assert HEADS[1] == "Location" and row_values(rows[0])[1] == "Haux"

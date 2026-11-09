@@ -11,7 +11,7 @@ import webbrowser
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from . import __version__, config, google_book, updates
-from .nine_j import NineJParseError, parse_pdf
+from .nine_j import SHIP_TO_CODES, NineJParseError, parse_pdf
 from .group_table import GroupTable
 from .planner import DEFAULT_SORT, DUPLICATE, SORTS, build_plan, display_groups, known_parts
 
@@ -32,6 +32,7 @@ class App(tk.Tk):
         self.tabs = None
         self.doc = None
         self.plan = None
+        self.location = None  # Location code of the loaded 9J's ship-to
         self.last_backup = None  # what Undo restores (the last update only)
         self.jobs: "queue.Queue" = queue.Queue()
         self._update_checked = False
@@ -167,10 +168,26 @@ class App(tk.Tk):
             messagebox.showerror(TITLE, f"Couldn't open the PDF:\n\n{e}")
             return
         d = self.doc
+        self.location = d.location_code
+        if self.location is None:
+            detected = d.ship_to or "(no Ship To found on the 9J)"
+            code = simpledialog.askstring(
+                TITLE, f"Detected Ship To: {detected}\n\nThis isn't a known location. "
+                       "What code should go in the sheet's Location column?", parent=self)
+            code = (code or "").strip()
+            if not code:
+                self.doc = None
+                messagebox.showinfo(TITLE, "No location code entered, so this 9J was not loaded.")
+                return
+            self.location = code
+            if d.ship_to:
+                SHIP_TO_CODES[" ".join(d.ship_to.lower().split())] = code  # remember this run
         self.info_var.set(
-            f"Release {d.release_id}  ·  released {d.release_date:%m/%d/%Y}  ·  PO {', '.join(d.pos)}  ·  "
+            f"Release {d.release_id}  ·  ship to {d.ship_to or '?'} ({self.location})  ·  "
+            f"released {d.release_date:%m/%d/%Y}  ·  PO {', '.join(d.pos)}  ·  "
             f"{len(d.items)} parts, {len(d.lines)} lines" if d.release_date else
-            f"Release {d.release_id}  ·  PO {', '.join(d.pos)}  ·  {len(d.lines)} lines")
+            f"Release {d.release_id}  ·  ship to {d.ship_to or '?'} ({self.location})  ·  "
+            f"PO {', '.join(d.pos)}  ·  {len(d.lines)} lines")
         if not self.cfg.spreadsheet_id and not self.change_sheet():
             return
         self._load_sheet_and_plan()
@@ -247,7 +264,8 @@ class App(tk.Tk):
         self._show_plan()
 
     def _build_plan(self):
-        return build_plan(self.doc, self.tabs, self.cfg.part_tabs, sort=self.cfg.sort_order)
+        return build_plan(self.doc, self.tabs, self.cfg.part_tabs, sort=self.cfg.sort_order,
+                          location=self.location)
 
     def _on_sort(self):
         """New order for the rows written to the sheet: re-plan on the sheet we already read."""

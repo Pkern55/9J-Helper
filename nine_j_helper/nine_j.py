@@ -39,6 +39,22 @@ class NineJParseError(Exception):
     pass
 
 
+# Ship To name on the 9J -> code written in the sheet's Location column (keys are normalized).
+SHIP_TO_CODES = {
+    "hendrickson auxiliary axle": "Haux",
+    "hendrickson distribution": "Dist",
+    "hendrickson trailer c.v.s.": "Mitc",
+}
+
+
+def _norm_name(s: str) -> str:
+    return " ".join((s or "").lower().split())
+
+
+def location_code(ship_to: str) -> Optional[str]:
+    return SHIP_TO_CODES.get(_norm_name(ship_to))
+
+
 @dataclass
 class ScheduleLine:
     part: str
@@ -86,7 +102,13 @@ class NineJ:
     buyer: str = ""
     release_date: Optional[date] = None
     release_id: str = ""
+    ship_to: str = ""  # name under the "Ship To" heading, e.g. "Hendrickson Auxiliary Axle"
     items: List[Item] = field(default_factory=list)
+
+    @property
+    def location_code(self) -> Optional[str]:
+        """Sheet Location code for this 9J's ship-to, or None if the name isn't known."""
+        return location_code(self.ship_to)
 
     @property
     def lines(self) -> List[ScheduleLine]:
@@ -146,6 +168,10 @@ def parse_text(text: str) -> NineJ:
             pass
 
     lines = [ln.strip() for ln in text.splitlines()]
+    for j, ln in enumerate(lines[:-1]):
+        if ln.lower() == "ship to" and lines[j + 1]:
+            doc.ship_to = lines[j + 1]
+            break
     item: Optional[Item] = None
     interval = ""
     i = 0

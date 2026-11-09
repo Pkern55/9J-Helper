@@ -76,8 +76,9 @@ Each added row gets:
 | Ship to Customer | `=WORKDAY(C<row>,-2)` |
 | Balance Due / Net Req Qty | `=D<row>-F<row>` |
 | part number (Machined Only, col K) | the part number again |
+| Location (when the tab has one) | code from the 9J Ship To: Haux / Dist / Mitc |
 
-Everything else (Location, Shipped Qty, ship dates, P/S, comments) is left for you. Firm and
+Everything else (Shipped Qty, ship dates, P/S, comments) is left for you. Firm and
 planned lines are both added.
 
 Formatting on new rows:

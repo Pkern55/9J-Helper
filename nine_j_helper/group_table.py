@@ -13,8 +13,8 @@ from typing import List, Optional
 
 from .planner import ADDED, NEEDS_TAB, REMOVED, SKIPPED, Group
 
-HEADS = ("Sheet tab", "Part (Item #)", "Delivery date", "Req qty (Net)", "Status")
-WIDTHS = (170, 110, 100, 100, 330)  # the last column grows with the window
+HEADS = ("Sheet tab", "Location", "Part (Item #)", "Delivery date", "Req qty (Net)", "Status")
+WIDTHS = (170, 80, 110, 100, 100, 330)  # the last column grows with the window
 
 ROW_H = 22
 GROUP_GAP = 12
@@ -37,7 +37,7 @@ def _fmt_qty(q) -> str:
 
 def row_values(row) -> tuple:
     d = f"{row.delivery_date:%m/%d/%Y}" if row.delivery_date else ""
-    return (row.tab or "—", row.part, d, _fmt_qty(row.qty), row.status)
+    return (row.tab or "—", row.location or "—", row.part, d, _fmt_qty(row.qty), row.status)
 
 
 class GroupTable(ttk.Frame):

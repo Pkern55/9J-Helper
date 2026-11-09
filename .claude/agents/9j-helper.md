@@ -82,7 +82,7 @@ For each 9J line:
    - Req Qty ← **Net Req Qty** (`net_qty`)
    - Formulas, always, with the row's own number (`planner.formula_cells`): Ship to Customer
      `=WORKDAY(C,-2)`, Balance/Net `=D-F`, and the part-number copy column (Machined Only K).
-   No Location or other columns. Firm and planned lines are both written, alike.
+   Location is written from the 9J Ship To (Hendrickson Auxiliary Axle=Haux, Hendrickson Distribution=Dist, HENDRICKSON TRAILER C.V.S.=Mitc) and also used with Part Number when matching rows to replace; no other columns. Firm and planned lines are both written, alike.
 5. **Formatting:** col A text color = that part's **most recent row's** text color on the
    tab (explicit default if that row is uncolored; brand-new parts untouched). Thin black
    borders on all sides of A–J. Nothing else (no fill, no bold, no format copy).
