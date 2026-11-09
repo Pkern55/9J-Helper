@@ -740,3 +740,29 @@ def test_update_banner_shows_once_and_can_be_closed(gui, monkeypatch):
 def test_update_check_is_off_until_a_sheet_is_configured():
     from nine_j_helper import config
     assert config.UPDATE_SHEET_ID == "" or len(config.UPDATE_SHEET_ID) > 20
+
+
+MULTI_PAGE_TEXT = """Vendor ID: 5800531 Buyer: X
+Vendor Name: R M KERNER COMPANY Release Date: 11/06/26
+Release ID: 20261106-001
+Last Receipt Date Receipt Qty Hendrickson Item # Supplier Item # Unit of Measure Item Revision
+11/04/26 594.0 R-006348 EA
+Item Description
+REPLACEMENT KP HOUSING,UPPER
+Daily 10/02/26 R-006348 released 090426 f 1,000.0 8,425.0 109.0
+Last Receipt Date Receipt Qty Hendrickson Item # Item Description
+P.O. # Supplier Item # Item Revision
+5800531A
+Interval Deliver Date Part Reference F P ir l m an / Req Qty Cum Req Qty Net Req Qty
+07/05/27 R-006348 P 800.0 16,132.0 800.0
+"""
+
+
+def test_r_prefix_stripped_description_and_page_repeat():
+    doc = parse_text(MULTI_PAGE_TEXT)
+    assert [it.hendrickson_item for it in doc.items] == ["006348"]
+    it = doc.items[0]
+    assert it.description == "REPLACEMENT KP HOUSING,UPPER"
+    assert it.po == "5800531A"
+    assert [ln.part for ln in it.lines] == ["006348", "006348"]
+    assert all(ln.sheet_part == "006348" for ln in doc.lines)

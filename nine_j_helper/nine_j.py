@@ -25,7 +25,14 @@ ITEM_LINE = re.compile(
     rf"^(?:(?P<last_date>{DATE})\s+(?P<last_qty>{NUM})\s+)?(?P<item>\S+)\s*(?P<desc>.*)$"
 )
 # Line after the "P.O. # Supplier Item # Item Revision" heading.
-PO_LINE = re.compile(r"^(?P<po>\S+)\s+(?P<supplier_item>\S+)(?:\s+(?P<rev>\S+))?\s*$")
+PO_LINE = re.compile(r"^(?P<po>\S+)(?:\s+(?P<supplier_item>\S+)(?:\s+(?P<rev>\S+))?)?\s*$")
+PO_HEADING = re.compile(r"^P\.?\s?O\.?\s*#")
+# Vendor-side "R-" prefix on Hendrickson part numbers is dropped (R-006348 -> 006348).
+R_PREFIX = re.compile(r"^R-(?=\S)", re.IGNORECASE)
+
+
+def clean_part(part: str) -> str:
+    return R_PREFIX.sub("", part)
 
 
 class NineJParseError(Exception):
@@ -145,21 +152,33 @@ def parse_text(text: str) -> NineJ:
     while i < len(lines):
         ln = lines[i]
         if ln.startswith("Last Receipt Date") and i + 1 < len(lines):
+            if PO_HEADING.match(lines[i + 1]):
+                # Page-top heading repeated for a block continuing from the previous
+                # page: no new item starts here.
+                i += 1
+                continue
             m = ITEM_LINE.match(lines[i + 1])
             if m:
-                item = Item(hendrickson_item=m.group("item"), description=m.group("desc").strip())
+                desc = m.group("desc").strip()
+                skip = 2
+                if lines[i + 2:i + 3] == ["Item Description"] and i + 3 < len(lines):
+                    # Layout with the description on its own line under an
+                    # "Item Description" label (the same line holds the unit of measure).
+                    desc = lines[i + 3].strip()
+                    skip = 4
+                item = Item(hendrickson_item=clean_part(m.group("item")), description=desc)
                 if m.group("last_date"):
                     item.last_receipt_date = _date(m.group("last_date"))
                     item.last_receipt_qty = _num(m.group("last_qty"))
                 doc.items.append(item)
                 interval = ""
-                i += 2
+                i += skip
                 continue
-        if re.match(r"^P\.?\s?O\.?\s*#", ln) and item is not None and i + 1 < len(lines):
+        if PO_HEADING.match(ln) and item is not None and i + 1 < len(lines):
             m = PO_LINE.match(lines[i + 1])
             if m:
                 item.po = m.group("po")
-                item.supplier_item = m.group("supplier_item")
+                item.supplier_item = m.group("supplier_item") or ""
                 item.revision = m.group("rev") or ""
                 i += 2
                 continue
@@ -168,10 +187,10 @@ def parse_text(text: str) -> NineJ:
             if m.group("interval"):
                 interval = m.group("interval")
             if item is None:  # schedule line without a header; keep it anyway
-                item = Item(hendrickson_item=m.group("part"))
+                item = Item(hendrickson_item=clean_part(m.group("part")))
                 doc.items.append(item)
             item.lines.append(ScheduleLine(
-                part=m.group("part"),
+                part=clean_part(m.group("part")),
                 delivery_date=_date(m.group("date")),
                 firm_plan=m.group("fp"),
                 req_qty=_num(m.group("req")),
