@@ -13,26 +13,31 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from . import __version__, config, google_book, updates
 from .nine_j import SHIP_TO_CODES, NineJParseError, parse_pdf
 from .group_table import GroupTable
-from .planner import DEFAULT_SORT, DUPLICATE, SORTS, build_plan, display_groups, known_parts
+from .planner import (DEFAULT_SORT, DUPLICATE, SORTS, build_plan, display_groups, find_overlaps,
+                      known_parts)
 
 TITLE = f"9J Helper {__version__}"
+
+UI_FONT = ("Segoe UI", 10)
+MUTED = "#666666"
+ACCENT = "#1f6feb"
 
 
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(TITLE)
-        self.geometry("900x560")
-        self.minsize(700, 420)
+        self.geometry("980x640")
+        self.minsize(760, 460)
+        self._style()
         self.cfg = config.Config.load()
         if self.cfg.sort_order not in SORTS:
             self.cfg.sort_order = DEFAULT_SORT
         self.client = None
         self.book = None
         self.tabs = None
-        self.doc = None
+        self.docs = []  # the loaded 9Js: [(file name, NineJ, Location code of its ship-to)]
         self.plan = None
-        self.location = None  # Location code of the loaded 9J's ship-to
         self.last_backup = None  # what Undo restores (the last update only)
         self.jobs: "queue.Queue" = queue.Queue()
         self._update_checked = False
@@ -42,29 +47,47 @@ class App(tk.Tk):
         self._refresh_sheet_label()
 
     # ------------------------------------------------------------ layout
+    def _style(self):
+        st = ttk.Style(self)
+        try:
+            st.theme_use("vista" if "vista" in st.theme_names() else "clam")
+        except tk.TclError:
+            pass
+        self.option_add("*Font", UI_FONT)
+        st.configure(".", font=UI_FONT)
+        st.configure("TButton", padding=(12, 5))
+        st.configure("Title.TLabel", font=("Segoe UI Semibold", 10))
+        st.configure("Muted.TLabel", foreground=MUTED)
+        st.configure("Card.TLabelframe", padding=(10, 6))
+        st.configure("Card.TLabelframe.Label", font=("Segoe UI Semibold", 10))
+        st.configure("Accent.TButton", font=("Segoe UI Semibold", 10), padding=(18, 7))
+        st.map("Accent.TButton", foreground=[("disabled", "#999999")])
+        self.configure(background=st.lookup("TFrame", "background") or "#f0f0f0")
+
     def _build(self):
-        pad = {"padx": 8, "pady": 4}
+        pad = {"padx": 12, "pady": 5}
         top = ttk.Frame(self)
         self._top = top  # the update banner is packed above this
-        top.pack(fill="x", **pad)
-        ttk.Label(top, text="Google Sheet:").pack(side="left")
+        top.pack(fill="x", padx=12, pady=(10, 4))
+        ttk.Label(top, text="Google Sheet:", style="Muted.TLabel").pack(side="left")
         self.sheet_var = tk.StringVar()
-        ttk.Label(top, textvariable=self.sheet_var, font=("Segoe UI", 9, "bold")).pack(side="left", padx=6)
+        ttk.Label(top, textvariable=self.sheet_var, style="Title.TLabel").pack(side="left", padx=6)
         ttk.Button(top, text="Change sheet…", command=self.change_sheet).pack(side="right")
 
-        row = ttk.Frame(self)
-        row.pack(fill="x", **pad)
-        ttk.Label(row, text="9J PDF:").pack(side="left")
+        files = ttk.LabelFrame(self, text="9J PDF(s)", style="Card.TLabelframe")
+        files.pack(fill="x", **pad)
+        row = ttk.Frame(files)
+        row.pack(fill="x")
         self.file_var = tk.StringVar()
-        ttk.Entry(row, textvariable=self.file_var, state="readonly").pack(side="left", fill="x", expand=True, padx=6)
+        ttk.Entry(row, textvariable=self.file_var, state="readonly").pack(side="left", fill="x", expand=True)
         self.browse_btn = ttk.Button(row, text="Browse…", command=self.browse)
-        self.browse_btn.pack(side="right")
-
-        self.info_var = tk.StringVar(value="Click Browse and pick the 9J PDF.")
-        ttk.Label(self, textvariable=self.info_var, wraplength=860, justify="left").pack(fill="x", **pad)
+        self.browse_btn.pack(side="right", padx=(8, 0))
+        self.info_var = tk.StringVar(value="Click Browse and pick the 9J PDF (select several to process them together).")
+        ttk.Label(files, textvariable=self.info_var, wraplength=900, justify="left",
+                  style="Muted.TLabel").pack(fill="x", pady=(6, 0))
 
         order = ttk.Frame(self)
-        order.pack(fill="x", **pad)
+        order.pack(fill="x", padx=12, pady=(6, 2))
         ttk.Label(order, text="Add rows to the sheet in this order:").pack(side="left")
         self.sort_var = tk.StringVar(value=SORTS[self.cfg.sort_order])
         self.sort_cb = ttk.Combobox(order, textvariable=self.sort_var, values=list(SORTS.values()),
@@ -72,24 +95,27 @@ class App(tk.Tk):
         self.sort_cb.pack(side="left", padx=6)
         self.sort_cb.bind("<<ComboboxSelected>>", lambda _e: self._on_sort())
         ttk.Label(order, text="(the list below follows the 9J, one box per part)",
-                  foreground="#777777").pack(side="left", padx=6)
+                  style="Muted.TLabel").pack(side="left", padx=6)
 
         self.table = GroupTable(self)
-        self.table.pack(fill="both", expand=True, **pad)
+        self.table.pack(fill="both", expand=True, padx=12, pady=4)
 
-        bottom = ttk.Frame(self)
-        bottom.pack(fill="x", **pad)
         self.status_var = tk.StringVar()
-        ttk.Label(bottom, textvariable=self.status_var).pack(side="left")
-        self.update_btn = ttk.Button(bottom, text="Update Sheet", command=self.update_sheet, state="disabled")
+        ttk.Label(self, textvariable=self.status_var, style="Muted.TLabel").pack(
+            fill="x", padx=12, pady=(2, 0))
+        ttk.Separator(self).pack(fill="x", padx=12, pady=(6, 0))
+        bottom = ttk.Frame(self)
+        bottom.pack(fill="x", padx=12, pady=(8, 10))
+        self.update_btn = ttk.Button(bottom, text="Update Sheet", style="Accent.TButton",
+                                     command=self.update_sheet, state="disabled")
         self.update_btn.pack(side="right")
         self.undo_btn = ttk.Button(bottom, text="Undo last update", command=self.undo_update,
                                    state="disabled")
         self.undo_btn.pack(side="right", padx=(0, 8))
-        ttk.Button(bottom, text="Known parts…", command=self.show_known_parts).pack(side="right", padx=(0, 12))
+        ttk.Button(bottom, text="Known parts…", command=self.show_known_parts).pack(side="right", padx=(0, 8))
         self.test_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(bottom, text="Test mode (highlight only: red = would delete, pink = added)",
-                        variable=self.test_var).pack(side="right", padx=12)
+                        variable=self.test_var).pack(side="left")
 
     def _refresh_sheet_label(self):
         if self.cfg.spreadsheet_id:
@@ -144,53 +170,72 @@ class App(tk.Tk):
         self.book = None
         self.tabs = None
         self._refresh_sheet_label()
-        if self.doc:
+        if self.docs:
             self._load_sheet_and_plan()
         return True
 
     def browse(self):
-        path = filedialog.askopenfilename(
-            title="Choose the 9J PDF", filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")],
+        paths = filedialog.askopenfilenames(
+            title="Choose the 9J PDF(s)", filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")],
             initialdir=self.cfg.last_folder or os.path.expanduser("~"))
-        if not path:
+        if not paths:
             return
-        self.cfg.last_folder = os.path.dirname(path)
+        self.cfg.last_folder = os.path.dirname(paths[0])
         self.cfg.save()
-        self.file_var.set(path)
-        try:
-            self.doc = parse_pdf(path)
-        except NineJParseError as e:
-            self.doc = None
-            messagebox.showerror(TITLE, f"Couldn't read this 9J:\n\n{e}")
-            return
-        except Exception as e:  # noqa: BLE001
-            self.doc = None
-            messagebox.showerror(TITLE, f"Couldn't open the PDF:\n\n{e}")
-            return
-        d = self.doc
-        self.location = d.location_code
-        if self.location is None:
-            detected = d.ship_to or "(no Ship To found on the 9J)"
-            code = simpledialog.askstring(
-                TITLE, f"Detected Ship To: {detected}\n\nThis isn't a known location. "
-                       "What code should go in the sheet's Location column?", parent=self)
-            code = (code or "").strip()
-            if not code:
-                self.doc = None
-                messagebox.showinfo(TITLE, "No location code entered, so this 9J was not loaded.")
+        names = [os.path.basename(p) for p in paths]
+        self.file_var.set(paths[0] if len(paths) == 1 else f"{len(paths)} files: " + ", ".join(names))
+
+        def work():
+            out = []
+            for path, name in zip(paths, names):
+                try:
+                    out.append((name, parse_pdf(path)))
+                except NineJParseError as e:
+                    raise RuntimeError(f"Couldn't read the 9J {name}:\n\n{e}") from e
+                except Exception as e:  # noqa: BLE001
+                    raise RuntimeError(f"Couldn't open the PDF {name}:\n\n{e}") from e
+            return out
+
+        def done(result, err):
+            if err:
+                self.docs = []
+                messagebox.showerror(TITLE, str(err))
                 return
-            self.location = code
-            if d.ship_to:
-                SHIP_TO_CODES[" ".join(d.ship_to.lower().split())] = code  # remember this run
-        self.info_var.set(
-            f"Release {d.release_id}  ·  ship to {d.ship_to or '?'} ({self.location})  ·  "
-            f"released {d.release_date:%m/%d/%Y}  ·  PO {', '.join(d.pos)}  ·  "
-            f"{len(d.items)} parts, {len(d.lines)} lines" if d.release_date else
-            f"Release {d.release_id}  ·  ship to {d.ship_to or '?'} ({self.location})  ·  "
-            f"PO {', '.join(d.pos)}  ·  {len(d.lines)} lines")
+            self._accept_docs(result)
+
+        self._run("Reading the 9J PDF(s)…", work, done)
+
+    def _accept_docs(self, parsed):
+        """Work out each 9J's Location code (asking for unknown ship-tos), then read the sheet."""
+        docs = []
+        for name, d in parsed:
+            location = d.location_code
+            if location is None:
+                detected = d.ship_to or "(no Ship To found on the 9J)"
+                code = simpledialog.askstring(
+                    TITLE, f"{name}\nDetected Ship To: {detected}\n\nThis isn't a known location. "
+                           "What code should go in the sheet's Location column?", parent=self)
+                location = (code or "").strip()
+                if not location:
+                    self.docs = []
+                    messagebox.showinfo(TITLE, f"No location code entered for {name}, so nothing "
+                                               "was loaded.")
+                    return
+                if d.ship_to:
+                    SHIP_TO_CODES[" ".join(d.ship_to.lower().split())] = location  # remember this run
+            docs.append((name, d, location))
+        self.docs = docs
+        self.info_var.set("\n".join(self._info_line(n, d, loc, len(docs) > 1) for n, d, loc in docs))
         if not self.cfg.spreadsheet_id and not self.change_sheet():
             return
         self._load_sheet_and_plan()
+
+    @staticmethod
+    def _info_line(name, d, location, multi):
+        rel = f"  ·  released {d.release_date:%m/%d/%Y}" if d.release_date else ""
+        return ((f"{name}:  " if multi else "")
+                + f"Release {d.release_id}  ·  ship to {d.ship_to or '?'} ({location}){rel}  ·  "
+                  f"PO {', '.join(d.pos)}  ·  {len(d.items)} parts, {len(d.lines)} lines")
 
     def _load_sheet_and_plan(self):
         sid = self.cfg.spreadsheet_id
@@ -247,6 +292,21 @@ class App(tk.Tk):
             self._banner = None
 
     def _make_plan(self):
+        overlaps = find_overlaps(self.docs)
+        if overlaps:
+            # Replace mode can't tell which 9J should win for a part both list at one location.
+            self.plan = None
+            self.table.show([], summary=False)
+            self.update_btn.configure(state="disabled")
+            self.status_var.set("Nothing loaded: the 9Js overlap.")
+            lines = "\n".join(f"  {part} at {loc or '(no location)'}: {', '.join(names)}"
+                               for part, loc, names in overlaps)
+            messagebox.showerror(
+                TITLE, "These 9Js list the same part for the same location, so it isn't clear "
+                       f"which one should replace the sheet's rows:\n\n{lines}\n\n"
+                       "Click Browse and choose just one of those 9Js (or only the ones that "
+                       "don't overlap).")
+            return
         self.plan = self._build_plan()
         # Ask about parts we can't place, one question per part.
         asked = set()
@@ -264,15 +324,15 @@ class App(tk.Tk):
         self._show_plan()
 
     def _build_plan(self):
-        return build_plan(self.doc, self.tabs, self.cfg.part_tabs, sort=self.cfg.sort_order,
-                          location=self.location)
+        return build_plan([(d, loc) for _, d, loc in self.docs], self.tabs, self.cfg.part_tabs,
+                          sort=self.cfg.sort_order)
 
     def _on_sort(self):
         """New order for the rows written to the sheet: re-plan on the sheet we already read."""
         key = next((k for k, v in SORTS.items() if v == self.sort_var.get()), DEFAULT_SORT)
         self.cfg.sort_order = key
         self.cfg.save()
-        if self.plan is not None and self.doc and self.tabs:
+        if self.plan is not None and self.docs and self.tabs:
             self.plan = self._build_plan()
             self._show_plan()
 
@@ -365,7 +425,7 @@ class App(tk.Tk):
             self.last_backup = None
             self.undo_btn.configure(state="disabled")
             messagebox.showinfo(TITLE, "Undone. The sheet is back as it was before the update.")
-            if self.doc:  # show the preview again, from the restored sheet
+            if self.docs:  # show the preview again, from the restored sheet
                 self._load_sheet_and_plan()
             else:
                 self.status_var.set("Undone.")
@@ -407,7 +467,7 @@ class App(tk.Tk):
         self.info_var.set(
             f"Update complete: removed {plan.removed_count} unshipped row(s), added {added} line(s)"
             + (f", skipped {skipped} already shipped" if skipped else "")
-            + ". Click Browse to load another 9J.")
+            + ". Click Browse to load more 9Js.")
         self.status_var.set("Sheet updated.")
 
 

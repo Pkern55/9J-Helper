@@ -229,7 +229,8 @@ class PlannedLine:
     row: Optional[int] = None  # 1-based target row (new lines only)
     candidates: List[str] = field(default_factory=list)
     note: str = ""
-    seq: int = 0  # position of the line on the 9J
+    seq: int = 0  # position of the line on the 9J (a running count across all loaded 9Js)
+    location: str = ""  # Location code of the 9J this line came from ("" = none)
 
 
 @dataclass
@@ -271,6 +272,7 @@ class RemovedRow:
     part: str
     delivery_date: Optional[date]
     req_qty: object
+    location: str = ""
 
 
 @dataclass
@@ -345,9 +347,34 @@ def _sort_key(sort: str):
     return lambda pl: (pl.line.delivery_date, part_text(pl.line.sheet_part), pl.seq)
 
 
-def build_plan(doc: NineJ, tabs: Dict[str, TabState], overrides: Optional[Dict[str, str]] = None,
+def _entries(doc, location: Optional[str]) -> List[Tuple[ScheduleLine, Optional[str]]]:
+    """Every (line, Location code) to plan. `doc` is one 9J, or a list whose items are a 9J or a
+    (9J, location) pair; a bare 9J in a list uses `location`."""
+    docs = [doc] if isinstance(doc, NineJ) else list(doc)
+    out: List[Tuple[ScheduleLine, Optional[str]]] = []
+    for d in docs:
+        d, loc = d if isinstance(d, tuple) else (d, location)
+        out.extend((ln, loc) for ln in d.lines)
+    return out
+
+
+def find_overlaps(docs: List[Tuple[str, NineJ, Optional[str]]]) -> List[Tuple[str, str, List[str]]]:
+    """Parts that two or more of the loaded 9Js both list for the same Location. Replace mode
+    can't tell which 9J should win, so the app refuses these. `docs` is [(name, 9J, location)].
+    Returns [(part, location, [names])]."""
+    seen: Dict[Tuple[str, str], Dict[str, str]] = {}  # (part_key, loc) -> {name: part text}
+    for name, d, loc in docs:
+        for ln in d.lines:
+            seen.setdefault((part_key(ln.sheet_part), loc_key(loc) if loc else ""), {}).setdefault(
+                name, part_text(ln.sheet_part))
+    return [(next(iter(names.values())), loc, list(names))
+            for (_, loc), names in seen.items() if len(names) > 1]
+
+
+def build_plan(doc, tabs: Dict[str, TabState], overrides: Optional[Dict[str, str]] = None,
                sort: str = DEFAULT_SORT, location: Optional[str] = None) -> Plan:
-    """Replace mode. For every part on the 9J, that part's unshipped rows (no Shipped Qty, Actual
+    """Replace mode. `doc` is one 9J or several (see `_entries`; each has its own location).
+    For every part on the 9J, that part's unshipped rows (no Shipped Qty, Actual
     Ship Date or P/S) at the 9J's `location` code are deleted from its tab and all of its 9J lines
     are written after the last remaining order. Shipped rows are never touched, and a 9J line that
     matches a shipped row's part + location + date is skipped. Rows with a blank Location never
@@ -355,32 +382,38 @@ def build_plan(doc: NineJ, tabs: Dict[str, TabState], overrides: Optional[Dict[s
     (9J Net Req Qty) and the formula cells from `formula_cells`. `sort` (a key of SORTS) sets the
     order the new rows are written in."""
     overrides = overrides or {}
-    loc = loc_key(location) if location else None
     planned: List[PlannedLine] = []
     seen = set()
-    for seq, ln in enumerate(doc.lines):
+    for seq, (ln, location) in enumerate(_entries(doc, location)):
+        loc = loc_key(location) if location else None
+        lcode = location or ""
         tab, cands, note = _route(ln, tabs, overrides)
         if tab is None:
-            planned.append(PlannedLine(ln, UNROUTED, candidates=cands, note=note, seq=seq))
+            planned.append(PlannedLine(ln, UNROUTED, candidates=cands, note=note, seq=seq,
+                                       location=lcode))
             continue
         key = (part_key(ln.sheet_part), to_serial(ln.delivery_date))
         st_ = tabs[tab]
         on_sheet = (key in st_.existing if loc is None
                     else (key[0], loc, key[1]) in st_.existing_loc)
-        if on_sheet or (tab, key) in seen:
-            planned.append(PlannedLine(ln, DUPLICATE, tab=tab, note=note, seq=seq))
+        if on_sheet or (tab, key, loc) in seen:
+            planned.append(PlannedLine(ln, DUPLICATE, tab=tab, note=note, seq=seq, location=lcode))
             continue
-        seen.add((tab, key))
-        planned.append(PlannedLine(ln, NEW, tab=tab, note=note, seq=seq))
+        seen.add((tab, key, loc))
+        planned.append(PlannedLine(ln, NEW, tab=tab, note=note, seq=seq, location=lcode))
 
     writes: Dict[str, TabWrite] = {}
     removed: List[RemovedRow] = []
     for name, st in tabs.items():
         lay = st.layout
         new = [pl for pl in planned if pl.status == NEW and pl.tab == name]
-        on_9j = {part_key(pl.line.sheet_part) for pl in planned if pl.tab == name}
+        # (part, location) pairs on the 9Js; a part at a location of None matches any location.
+        on_9j = {(part_key(pl.line.sheet_part), loc_key(pl.location) if pl.location else None)
+                 for pl in planned if pl.tab == name}
         delete = [r for r in st.unshipped_rows  # ascending
-                  if st.row_parts[r] in on_9j and (loc is None or st.row_locs[r] == loc)]
+                  if (st.row_parts[r], st.row_locs[r]) in on_9j or (st.row_parts[r], None) in on_9j]
+        loc_text = {(part_key(pl.line.sheet_part), loc_key(pl.location)): pl.location
+                    for pl in planned if pl.tab == name and pl.location}
         if not new and not delete:
             continue
         new.sort(key=_sort_key(sort))
@@ -389,7 +422,8 @@ def build_plan(doc: NineJ, tabs: Dict[str, TabState], overrides: Optional[Dict[s
         for r in delete:
             row = st.rows[r - 1]
             removed.append(RemovedRow(name, r, part_text(_cell(row, lay.part)),
-                                      from_serial(_cell(row, lay.date)), _cell(row, lay.req)))
+                                      from_serial(_cell(row, lay.date)), _cell(row, lay.req),
+                                      loc_text.get((st.row_parts[r], st.row_locs[r]), "")))
 
         def after_delete(r: int) -> int:  # sheet row r (not deleted) -> its row once deletes ran
             return r - bisect_left(delete, r)
@@ -414,15 +448,16 @@ def build_plan(doc: NineJ, tabs: Dict[str, TabState], overrides: Optional[Dict[s
             cells: Dict[int, object] = {lay.part: part, lay.date: pl.line.delivery_date}
             if lay.req is not None:
                 cells[lay.req] = pl.line.net_qty
-            if loc is not None and lay.location is not None:
-                cells[lay.location] = location
+            if pl.location and lay.location is not None:
+                cells[lay.location] = pl.location
             cells.update(formula_cells(lay, r, part))
             tw.rows[r] = cells
             k = part_key(pl.line.sheet_part)
             if k in st.latest_color:
                 tw.text_colors[r] = st.latest_color[k]
         writes[name] = tw
-    return Plan(lines=planned, writes=writes, removed=removed, location=location or "")
+    locations = list(dict.fromkeys(pl.location for pl in planned if pl.location))
+    return Plan(lines=planned, writes=writes, removed=removed, location=", ".join(locations))
 
 
 # ---------------------------------------------------------------- what the window shows
@@ -459,7 +494,7 @@ def display_groups(plan: Plan, summary: bool = False) -> List[Group]:
     for rr in plan.removed:
         txt = f"REMOVED (was row {rr.row})" if summary else f"REMOVE row {rr.row} (not shipped; replaced by the 9J)"
         by_part.setdefault(part_key(rr.part), []).append(
-            DisplayRow(REMOVED, rr.tab, rr.part, rr.delivery_date, rr.req_qty, txt, plan.location))
+            DisplayRow(REMOVED, rr.tab, rr.part, rr.delivery_date, rr.req_qty, txt, rr.location))
     for pl in plan.lines:
         ln = pl.line
         part = part_key(ln.sheet_part)
@@ -467,14 +502,14 @@ def display_groups(plan: Plan, summary: bool = False) -> List[Group]:
         if pl.status == NEW:
             txt = f"ADDED at row {pl.row}" if summary else f"new → row {pl.row}"
             by_part.setdefault(part, []).append(
-                DisplayRow(ADDED, pl.tab, ln.sheet_part, ln.delivery_date, ln.net_qty, txt, plan.location))
+                DisplayRow(ADDED, pl.tab, ln.sheet_part, ln.delivery_date, ln.net_qty, txt, pl.location))
         elif pl.status == DUPLICATE:
             by_part.setdefault(part, []).append(
                 DisplayRow(SKIPPED, pl.tab, ln.sheet_part, ln.delivery_date, ln.net_qty,
-                           "skipped (already shipped on sheet)", plan.location))
+                           "skipped (already shipped on sheet)", pl.location))
         else:
             unrouted.append(DisplayRow(NEEDS_TAB, "", ln.sheet_part, ln.delivery_date, ln.net_qty,
-                                       UNROUTED + " (skipped)", plan.location))
+                                       UNROUTED + " (skipped)", pl.location))
 
     def key(r: DisplayRow):
         return (r.delivery_date or date.min, _KIND_ORDER[r.kind])

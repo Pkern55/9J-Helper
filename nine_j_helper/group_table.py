@@ -16,17 +16,18 @@ from .planner import ADDED, NEEDS_TAB, REMOVED, SKIPPED, Group
 HEADS = ("Sheet tab", "Location", "Part (Item #)", "Delivery date", "Req qty (Net)", "Status")
 WIDTHS = (170, 80, 110, 100, 100, 330)  # the last column grows with the window
 
-ROW_H = 22
-GROUP_GAP = 12
-BOX_W = 3
-FONT = ("Segoe UI", 9)
+ROW_H = 26
+GROUP_GAP = 14
+BOX_W = 2
+FONT = ("Segoe UI", 10)
 
 # Preview: colored text. Summary: filled rows (green = added, red = removed).
 TEXT = {ADDED: "#0a6b0a", REMOVED: "#b00020", SKIPPED: "#777777", NEEDS_TAB: "#b00020"}
 FILL = {ADDED: "#c6efce", REMOVED: "#ffc7ce"}
 FILLED_TEXT = "#1e1e1e"
-LINE = "#d9d9d9"
-BOX = "#202020"
+LINE = "#e6e6e6"
+BOX = "#4a5568"
+HEAD_BG = "#e8ecf1"
 
 
 def _fmt_qty(q) -> str:
@@ -45,8 +46,8 @@ class GroupTable(ttk.Frame):
         super().__init__(master)
         self.groups: List[Group] = []
         self.summary = False
-        self.head = tk.Canvas(self, height=ROW_H + 2, highlightthickness=0, bg="#ececec")
-        self.body = tk.Canvas(self, highlightthickness=0, bg="white")
+        self.head = tk.Canvas(self, height=ROW_H + 2, highlightthickness=0, bg=HEAD_BG)
+        self.body = tk.Canvas(self, highlightthickness=1, highlightbackground="#c8ced6", bg="white")
         self.scroll = ttk.Scrollbar(self, orient="vertical", command=self.body.yview)
         self.body.configure(yscrollcommand=self.scroll.set)
         self.head.grid(row=0, column=0, sticky="ew")

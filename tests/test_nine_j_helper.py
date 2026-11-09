@@ -317,6 +317,14 @@ BLUE = {"rgbColor": {"blue": 1}}
 THIN = {"style": "SOLID", "colorStyle": {"rgbColor": {}}}
 
 
+def _white_req(first, last, sheet_id=1, cols=10):
+    return {"repeatCell": {
+        "range": {"sheetId": sheet_id, "startRowIndex": first - 1, "endRowIndex": last,
+                  "startColumnIndex": 0, "endColumnIndex": cols},
+        "cell": {"userEnteredFormat": {"backgroundColor": google_book.WHITE_FILL}},
+        "fields": "userEnteredFormat.backgroundColor"}}
+
+
 def _border_req(first, last, sheet_id=1):
     return {"updateBorders": {
         "range": {"sheetId": sheet_id, "startRowIndex": first - 1, "endRowIndex": last,
@@ -361,6 +369,7 @@ def test_google_apply_builds_requests():
         _color_req(5, BLUE),
         _color_req(7, BLUE),
         _border_req(4, 7),    # x rows 4-5 + inserted rows 6-7 form one block
+        _white_req(4, 7),     # and the whole block is filled white
     ]
     assert book.values["valueInputOption"] == "USER_ENTERED"
     first = book.values["data"][0]
@@ -449,7 +458,8 @@ def test_google_apply_sets_default_color_and_borders():
     assert google_book.apply(book, plan) == 3
     black = {"rgbColor": {}}
     assert book.batch["requests"][2:] == [
-        _color_req(4, black), _color_req(5, black), _color_req(6, black), _border_req(4, 6)]
+        _color_req(4, black), _color_req(5, black), _color_req(6, black), _border_req(4, 6),
+        _white_req(4, 6)]
 
 
 def test_google_apply_deletes_bottom_up_without_inserting_when_x_rows_suffice():
@@ -693,7 +703,7 @@ def test_group_table_draws_boxes_and_summary_fills(gui):
 
 def test_app_sort_dropdown_replans_and_summary_disables_it(gui):
     a = gui
-    a.doc = parse_text(SAMPLE_TEXT)
+    a.docs = [("a.pdf", parse_text(SAMPLE_TEXT), "Haux")]
     a.tabs = planner.load_tabs(fake_rows())
     a.cfg.part_tabs["NEWPART-9"] = "Machined Only"
     a._make_plan()
@@ -912,3 +922,65 @@ def test_display_rows_carry_the_location_code():
     assert rows and all(r.location == "Haux" for r in rows)
     from nine_j_helper.group_table import row_values, HEADS
     assert HEADS[1] == "Location" and row_values(rows[0])[1] == "Haux"
+
+
+# ------------------------------------------------------------------ several 9Js at once
+
+SECOND_TEXT = """Supplier Schedule
+Vendor ID: 504206 Buyer: Ryan Beck
+Vendor Name: R M KERNER COMPANY Release Date: 11/07/26
+Attention: CHRIS KERNER Release ID: 20261107-002
+Last Receipt Date Receipt Qty Hendrickson Item # Item Description
+10/20/26 28.0 020823 SOME BEAM
+P.O. # Supplier Item # Item Revision
+107564 020823 A
+Interval Deliver Date Part Reference F P ir l m an / Req Qty Cum Req Qty Net Req Qty
+Daily 11/10/26 020823 F* 50.0 50.0 50.0
+"""
+
+
+def test_two_9js_plan_together_with_their_own_locations():
+    docs = [(parse_text(SAMPLE_TEXT), "Haux"), (parse_text(SECOND_TEXT), "Dist")]
+    plan = planner.build_plan(docs, planner.load_tabs(fake_rows()), {"NEWPART-9": "Machined Only"})
+    assert plan.location == "Haux, Dist"
+    assert plan.new_count == 5
+    assert {pl.location for pl in plan.lines if pl.line.sheet_part == "020823"} == {"Dist"}
+    assert all(c[1] == "Dist" for c in plan.writes["S-Beams"].rows.values())
+    assert all(c[1] == "Haux" for c in plan.writes["Machined Only"].rows.values())
+    assert [pl.seq for pl in plan.lines] == [0, 1, 2, 3, 4]  # running count across files
+
+
+def test_same_part_and_date_at_different_locations_do_not_collapse():
+    docs = [(parse_text(SAMPLE_TEXT), "Haux"), (parse_text(SAMPLE_TEXT), "Dist")]
+    plan = planner.build_plan(docs, planner.load_tabs(fake_rows()), {"NEWPART-9": "Machined Only"})
+    assert plan.new_count == 8 and not any(pl.status == planner.DUPLICATE for pl in plan.lines)
+
+
+def test_find_overlaps_same_part_same_location_only():
+    a, b = parse_text(SAMPLE_TEXT), parse_text(SAMPLE_TEXT)
+    assert planner.find_overlaps([("a.pdf", a, "Haux"), ("b.pdf", b, "Dist")]) == []
+    found = planner.find_overlaps([("a.pdf", a, "Haux"), ("b.pdf", b, "haux"),
+                                   ("c.pdf", parse_text(SECOND_TEXT), "Haux")])
+    assert sorted(p for p, _, _ in found) == ["010545-1", "NEWPART-9"]
+    assert all(names == ["a.pdf", "b.pdf"] for _, _, names in found)
+
+
+def test_replace_deletes_only_the_matching_location_per_9j():
+    docs = [(parse_text(SAMPLE_TEXT), "Haux"), (parse_text(SAMPLE_TEXT), "Dist")]
+    plan = planner.build_plan(docs, planner.load_tabs(_loc_rows()))
+    assert plan.writes["Machined Only"].delete_rows == [2, 3]  # Haux and Dist; blank stays
+    assert sorted(r.location for r in plan.removed) == ["Dist", "Haux"]
+
+
+def test_app_overlapping_9js_are_refused(gui, monkeypatch):
+    a = gui
+    errors = []
+    monkeypatch.setattr("nine_j_helper.app.messagebox.showerror", lambda *x, **k: errors.append(x))
+    a.docs = [("a.pdf", parse_text(SAMPLE_TEXT), "Haux"), ("b.pdf", parse_text(SAMPLE_TEXT), "Haux")]
+    a.tabs = planner.load_tabs(fake_rows())
+    a._make_plan()
+    assert a.plan is None and errors and "a.pdf, b.pdf" in errors[0][1]
+    a.docs = [("a.pdf", parse_text(SAMPLE_TEXT), "Haux"), ("b.pdf", parse_text(SECOND_TEXT), "Dist")]
+    a.cfg.part_tabs["NEWPART-9"] = "Machined Only"
+    a._make_plan()
+    assert a.plan is not None and a.plan.new_count == 5

@@ -140,7 +140,8 @@ def _filter_extension(flt: Dict, insert_at, insert_count: int, last_row: int, de
     return {"setBasicFilter": {"filter": new}}
 
 
-TEST_DELETE_FILL = {"red": 1.0, "green": 0.2, "blue": 0.2}  # rows that would be deleted
+WHITE_FILL = {"red": 1.0, "green": 1.0, "blue": 1.0}  # background of every added row
+TEST_DELETE_FILL ={"red": 1.0, "green": 0.2, "blue": 0.2}  # rows that would be deleted
 TEST_ADD_FILL = {"red": 1.0, "green": 0.75, "blue": 0.85}  # rows that are added
 
 
@@ -243,13 +244,17 @@ def apply(book: gspread.Spreadsheet, plan: Plan, test_mode: bool = False) -> int
                           "startColumnIndex": 0, "endColumnIndex": tw.border_cols},
                 "top": thin, "bottom": thin, "left": thin, "right": thin,
                 "innerHorizontal": thin, "innerVertical": thin}})
+    def fill(sid, first, last, cols, color):
+        return {"repeatCell": {
+            "range": {"sheetId": sid, "startRowIndex": first - 1, "endRowIndex": last,
+                      "startColumnIndex": 0, "endColumnIndex": cols},
+            "cell": {"userEnteredFormat": {"backgroundColor": color}},
+            "fields": "userEnteredFormat.backgroundColor"}}
+    # Every added row is filled white (no stray colors from whatever was there before).
+    for tw in writes.values():
+        for first, last in tw.row_blocks():
+            requests.append(fill(sheet_ids[tw.tab], first, last, tw.border_cols, WHITE_FILL))
     if test_mode:
-        def fill(sid, first, last, cols, color):
-            return {"repeatCell": {
-                "range": {"sheetId": sid, "startRowIndex": first - 1, "endRowIndex": last,
-                          "startColumnIndex": 0, "endColumnIndex": cols},
-                "cell": {"userEnteredFormat": {"backgroundColor": color}},
-                "fields": "userEnteredFormat.backgroundColor"}}
         for name, tw in plan.writes.items():  # numbering: rows as the sheet is now
             for r in tw.delete_rows:
                 requests.append(fill(sheet_ids[name], r, r, tw.border_cols, TEST_DELETE_FILL))
