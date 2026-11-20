@@ -210,6 +210,7 @@ def selftest(pdf: str) -> None:
 
 
 def authorize():
+    from google.auth.exceptions import RefreshError
     from google.auth.transport.requests import AuthorizedSession, Request
     from google.oauth2.credentials import Credentials
     from google_auth_oauthlib.flow import InstalledAppFlow
@@ -219,8 +220,13 @@ def authorize():
     creds = Credentials.from_authorized_user_file(token, SCOPES) if os.path.exists(token) else None
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
+            try:
+                creds.refresh(Request())
+            except RefreshError:  # expired/revoked token: sign in again below
+                creds = None
         else:
+            creds = None
+        if creds is None:
             secret = config.client_secret_path()
             if not secret:
                 raise PublishError("client_secret.json wasn't found (see the README's Google setup).")
