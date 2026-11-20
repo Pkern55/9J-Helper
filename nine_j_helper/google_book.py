@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, replace
 from datetime import date
 from typing import Dict, List
 
 import gspread
+from google.auth.exceptions import RefreshError
 
 from . import config
 from .planner import Plan, TabWrite, col_letter, load_tabs, order_tab_names
@@ -26,8 +28,19 @@ def connect() -> gspread.Client:
             "Google sign-in isn't set up: client_secret.json was not found. "
             "See the README section 'Google setup'.")
     # Opens the browser for sign-in the first time; afterwards uses the saved token.
-    return gspread.oauth(scopes=SCOPES, credentials_filename=secret,
-                         authorized_user_filename=config.token_path())
+    def sign_in():
+        return gspread.oauth(scopes=SCOPES, credentials_filename=secret,
+                             authorized_user_filename=config.token_path())
+    try:
+        return sign_in()
+    except RefreshError:
+        # The saved token expired or was revoked (Google expires them after 7 days while the
+        # OAuth app is in "Testing"). Drop it and sign in again in the browser.
+        try:
+            os.remove(config.token_path())
+        except OSError:
+            pass
+        return sign_in()
 
 
 def open_book(client: gspread.Client, spreadsheet_id: str) -> gspread.Spreadsheet:
